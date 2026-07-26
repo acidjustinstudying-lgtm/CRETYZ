@@ -750,6 +750,201 @@ function runPart3Tests() {
     "\n\n=== Part 2: Origin 데이터 구조 ===\n" + part2Results.join("\n") +
     "\n\n=== Part 3: 전투 시스템 기초 ===\n" + part3Results.join("\n");
 };
+  /* ============================================================
+   CRETYZ Core - Part 4 / 1000 (세계수 회복 & 지역 언락 시스템)
+   ============================================================ */
+
+const WorldEvents = Object.freeze({
+  PURIFICATION_CHANGED: "OnPurificationChanged",
+  WORLD_TREE_LEVEL_UP: "OnWorldTreeLevelUp",
+  REGION_UNLOCKED: "OnRegionUnlocked",
+  BLIGHT_CORE_OBTAINED: "OnBlightCoreObtained"
+});
+
+// ---------- WorldTreeLevel 정의 ----------
+// 명세 기준 5단계 (Withered -> First Sprout -> Growing Leaves -> Blooming -> Restored)
+const WorldTreeLevel = Object.freeze({
+  WITHERED: 1,
+  FIRST_SPROUT: 2,
+  GROWING_LEAVES: 3,
+  BLOOMING: 4,
+  RESTORED: 5
+});
+
+const WorldTreeLevelNames = {
+  [WorldTreeLevel.WITHERED]: "Withered World Tree",
+  [WorldTreeLevel.FIRST_SPROUT]: "First Sprout",
+  [WorldTreeLevel.GROWING_LEAVES]: "Growing Leaves",
+  [WorldTreeLevel.BLOOMING]: "Blooming World Tree",
+  [WorldTreeLevel.RESTORED]: "Restored World Tree"
+};
+
+// 레벨업에 필요한 누적 정화 포인트. index 0 = Level1->2 필요치.
+const WorldTreeLevelThresholds = [50, 150, 300, 500]; // 4개 (5단계니까 레벨업은 4번)
+
+// ---------- 지역 언락 조건 ----------
+// RegionType(Part 1 정의)별로 "이 세계수 레벨 이상이어야 열림"을 매핑.
+// ResearchLaboratory는 항상 열려있는 시작 지역이라 조건 없음(1).
+const RegionUnlockRequirement = {
+  [RegionType.RESEARCH_LAB]: 1,
+  [RegionType.FORGOTTEN_GRASSLANDS]: 1,
+  [RegionType.WHISPERING_MUSHROOM_FOREST]: 1,
+  [RegionType.SCORCHED_DESERT]: 2,
+  [RegionType.FROZEN_VALLEY]: 2,
+  [RegionType.BURNING_VOLCANO]: 3,
+  [RegionType.LOST_FLOWER_CITY]: 3,
+  [RegionType.SKY_ISLANDS]: 4,
+  [RegionType.INSIDE_WORLD_TREE]: 5,
+  [RegionType.ROOTS_OF_WORLD_TREE]: 5
+};
+
+// ---------- WorldTreeState ----------
+class WorldTreeState {
+  static SAVE_KEY = "cretyz_worldtree_save";
+
+  constructor() {
+    this.level = WorldTreeLevel.WITHERED;
+    this.purificationPoints = 0;
+    this.totalBlightCoresObtained = 0;
+    this.unlockedRegions = new Set([RegionType.RESEARCH_LAB, RegionType.FORGOTTEN_GRASSLANDS]); // 시작 지역
+  }
+
+  // 오염 식물을 쓰러뜨리면 항상 핵을 얻는다 (정화/연구 선택은 이후에)
+  obtainBlightCore() {
+    this.totalBlightCoresObtained += 1;
+    GameEventBus.publish(WorldEvents.BLIGHT_CORE_OBTAINED, {
+      total: this.totalBlightCoresObtained
+    });
+  }
+
+  // 선택 ①: 세계수에 정화 - 정화 포인트 증가, 레벨업 가능
+  purifyCore(pointValue = 10) {
+    this.purificationPoints += pointValue;
+    GameEventBus.publish(WorldEvents.PURIFICATION_CHANGED, {
+      totalPoints: this.purificationPoints
+    });
+    this.#tryLevelUp();
+  }
+
+  // 선택 ②: 연구소로 가져가 연구 (세계수 레벨엔 영향 없음 - Part 6 연구 시스템에서 별도 보상 처리 예정)
+  researchCore() {
+    // 지금은 자리만 잡아둔다. 실제 연구 보상(기억 조각, 도감 등)은 이후 파트에서 연결.
+    return { researched: true };
+  }
+
+  #tryLevelUp() {
+    while (this.level < WorldTreeLevel.RESTORED) {
+      const requiredForNext = WorldTreeLevelThresholds[this.level - 1];
+      if (requiredForNext === undefined) break;
+
+      if (this.purificationPoints >= requiredForNext) {
+        this.level += 1;
+        GameEventBus.publish(WorldEvents.WORLD_TREE_LEVEL_UP, {
+          newLevel: this.level, levelName: WorldTreeLevelNames[this.level]
+        });
+        this.#unlockRegionsForLevel(this.level);
+      } else {
+        break; // 다음 레벨 조건 미달이면 더 볼 필요 없음 (임계값은 오름차순)
+      }
+    }
+  }
+
+  #unlockRegionsForLevel(level) {
+    for (const regionKey in RegionUnlockRequirement) {
+      const region = Number(regionKey); // Object 키는 문자열로 저장되므로 형변환 필요
+      const requiredLevel = RegionUnlockRequirement[region];
+
+      if (requiredLevel <= level && !this.unlockedRegions.has(region)) {
+        this.unlockedRegions.add(region);
+        GameEventBus.publish(WorldEvents.REGION_UNLOCKED, { region });
+      }
+    }
+  }
+
+  isRegionUnlocked(region) {
+    return this.unlockedRegions.has(region);
+  }
+
+  // ---- 저장/로드 ----
+  toJSON() {
+    return {
+      level: this.level,
+      purificationPoints: this.purificationPoints,
+      totalBlightCoresObtained: this.totalBlightCoresObtained,
+      unlockedRegions: Array.from(this.unlockedRegions)
+    };
+  }
+
+  static fromJSON(json) {
+    const state = new WorldTreeState();
+    state.level = json.level;
+    state.purificationPoints = json.purificationPoints;
+    state.totalBlightCoresObtained = json.totalBlightCoresObtained;
+    state.unlockedRegions = new Set(json.unlockedRegions);
+    return state;
+  }
+
+  save() {
+    try {
+      localStorage.setItem(WorldTreeState.SAVE_KEY, JSON.stringify(this.toJSON()));
+      return true;
+    } catch (err) {
+      console.error("[WorldTreeState] 저장 실패:", err);
+      return false;
+    }
+  }
+
+  static load() {
+    try {
+      const raw = localStorage.getItem(WorldTreeState.SAVE_KEY);
+      if (!raw) return null;
+      return WorldTreeState.fromJSON(JSON.parse(raw));
+    } catch (err) {
+      console.error("[WorldTreeState] 로드 실패, 손상된 세이브로 판단:", err);
+      return null;
+    }
+  }
+}
+
+// ---------- Part 4 부팅 테스트 ----------
+function runPart4Tests() {
+  const results = [];
+
+  const worldTree = new WorldTreeState();
+  results.push(`초기 레벨 WITHERED: ${worldTree.level === WorldTreeLevel.WITHERED ? "PASS" : "FAIL"}`);
+  results.push(`시작 지역 2곳 언락: ${worldTree.unlockedRegions.size === 2 ? "PASS" : "FAIL"}`);
+
+  worldTree.obtainBlightCore();
+  results.push(`오염핵 획득 카운트: ${worldTree.totalBlightCoresObtained === 1 ? "PASS" : "FAIL"}`);
+
+  // 정화 포인트 50 채워서 레벨업 유도
+  worldTree.purifyCore(50);
+  results.push(`정화 포인트 반영 및 레벨업: ${worldTree.level === WorldTreeLevel.FIRST_SPROUT ? "PASS" : "FAIL"} (level=${worldTree.level})`);
+
+  results.push(`사막 지역 아직 잠김(레벨2 미만 요구): ${!worldTree.isRegionUnlocked(RegionType.SCORCHED_DESERT) ? "PASS" : "FAIL"}`);
+
+  // 100 포인트 추가로 총 150 -> 레벨3(Growing Leaves)까지 도달해야 함
+  worldTree.purifyCore(100);
+  results.push(`연속 레벨업(3단계 도달): ${worldTree.level === WorldTreeLevel.GROWING_LEAVES ? "PASS" : "FAIL"} (level=${worldTree.level})`);
+  results.push(`사막 지역 언락됨(레벨2 조건 충족): ${worldTree.isRegionUnlocked(RegionType.SCORCHED_DESERT) ? "PASS" : "FAIL"}`);
+
+  const saved = worldTree.save();
+  const loaded = WorldTreeState.load();
+  results.push(`저장/로드 왕복: ${saved && loaded && loaded.level === worldTree.level ? "PASS" : "FAIL"}`);
+
+  return results;
+}
+  window.onload = () => {
+  const part1Results = runBootTests();
+  const part2Results = runPart2Tests();
+  const part3Results = runPart3Tests();
+  const part4Results = runPart4Tests();
+  document.getElementById("log").textContent =
+    "=== Part 1: Core 시스템 ===\n" + part1Results.join("\n") +
+    "\n\n=== Part 2: Origin 데이터 구조 ===\n" + part2Results.join("\n") +
+    "\n\n=== Part 3: 전투 시스템 기초 ===\n" + part3Results.join("\n") +
+    "\n\n=== Part 4: 세계수 & 지역 언락 ===\n" + part4Results.join("\n");
+};
 </script>
 </body>
 </html>
