@@ -427,6 +427,329 @@ function runPart2Tests() {
     "=== Part 1: Core 시스템 ===\n" + part1Results.join("\n") +
     "\n\n=== Part 2: Origin 데이터 구조 ===\n" + part2Results.join("\n");
 };
+  /* ============================================================
+   CRETYZ Core - Part 3 / 1000 (전투 시스템 기초)
+   ============================================================ */
+
+// ---------- 전투 이벤트 정의 ----------
+const CombatEvents = Object.freeze({
+  DAMAGE_TAKEN: "OnDamageTaken",
+  HEALED: "OnHealed",
+  UNIT_DIED: "OnUnitDied",
+  STATUS_APPLIED: "OnStatusApplied",
+  STATUS_EXPIRED: "OnStatusExpired",
+  ULTIMATE_READY: "OnUltimateReady",
+  SKILL_USED: "OnSkillUsed"
+});
+
+// ---------- StatusEffectInstance ----------
+// 상태이상 하나의 실제 인스턴스 (지속시간, 세기 포함).
+// StatusEffectType은 Part 1에서 정의한 비트플래그를 그대로 재사용.
+class StatusEffectInstance {
+  constructor(type, durationTurns, magnitude = 1) {
+    this.type = type;               // StatusEffectType 값 하나 (복수 조합 금지 - 인스턴스는 단일 효과)
+    this.remainingTurns = durationTurns;
+    this.magnitude = magnitude;     // 화상 데미지량, 공격력 증가율 등에 쓰이는 세기 값
+  }
+
+  tick() {
+    this.remainingTurns -= 1;
+    return this.remainingTurns <= 0; // true면 이번 틱에 만료됨
+  }
+}
+
+// ---------- StatusEffectManager ----------
+// 한 유닛이 가진 모든 상태이상을 관리. 여러 개 동시 보유 가능
+// (StatusEffectType이 Flags라 "종류"는 겹칠 수 없지만 - 예: Burn은 유닛당 1개만 -
+//  서로 다른 종류(Burn+Freeze)는 동시에 존재 가능).
+class StatusEffectManager {
+  constructor(ownerUnit) {
+    this.owner = ownerUnit;
+    this.activeEffects = new Map(); // key: StatusEffectType 값, value: StatusEffectInstance
+  }
+
+  apply(type, durationTurns, magnitude = 1) {
+    // 같은 종류가 이미 있으면 지속시간을 갱신(덮어쓰기)하지, 중첩 스택은 하지 않는다.
+    // 이유: 화상 5개가 겹쳐 데미지가 무한히 커지는 밸런스 붕괴를 방지.
+    const instance = new StatusEffectInstance(type, durationTurns, magnitude);
+    this.activeEffects.set(type, instance);
+    GameEventBus.publish(CombatEvents.STATUS_APPLIED, {
+      unit: this.owner, type, durationTurns, magnitude
+    });
+  }
+
+  remove(type) {
+    this.activeEffects.delete(type);
+  }
+
+  has(type) {
+    return this.activeEffects.has(type);
+  }
+
+  // 매 턴 종료 시 호출. 지속시간 감소 + 만료 처리 + 틱형 효과(화상/재생) 적용.
+  tickAll() {
+    const expired = [];
+
+    for (const [type, instance] of this.activeEffects) {
+      // 화상: 매 턴 고정 데미지
+      if (type === StatusEffectType.BURN) {
+        this.owner.takeDamage(instance.magnitude, StatusEffectType.NONE); // 상태이상 데미지가 또 상태이상을 걸진 않음
+      }
+      // 재생: 매 턴 고정 회복
+      if (type === StatusEffectType.REGENERATION) {
+        this.owner.heal(instance.magnitude);
+      }
+
+      const isExpired = instance.tick();
+      if (isExpired) expired.push(type);
+    }
+
+    for (const type of expired) {
+      this.activeEffects.delete(type);
+      GameEventBus.publish(CombatEvents.STATUS_EXPIRED, { unit: this.owner, type });
+    }
+  }
+
+  // 공격력/방어력 배율에 상태이상을 반영 (AttackBoost, DefenseBoost, Slow 등)
+  getAttackMultiplier() {
+    let mult = 1.0;
+    if (this.has(StatusEffectType.ATTACK_BOOST)) {
+      mult *= (1 + this.activeEffects.get(StatusEffectType.ATTACK_BOOST).magnitude);
+    }
+    return mult;
+  }
+
+  getDefenseMultiplier() {
+    let mult = 1.0;
+    if (this.has(StatusEffectType.DEFENSE_BOOST)) {
+      mult *= (1 + this.activeEffects.get(StatusEffectType.DEFENSE_BOOST).magnitude);
+    }
+    return mult;
+  }
+
+  isStunned() {
+    return this.has(StatusEffectType.STUN);
+  }
+
+  isFrozen() {
+    return this.has(StatusEffectType.FREEZE);
+  }
+}
+
+// ---------- UltimateGauge ----------
+// 데미지를 주거나 받거나, 서포트 행동을 하면 채워지는 궁극기 게이지.
+class UltimateGauge {
+  static MAX_VALUE = 100;
+
+  constructor() {
+    this.value = 0;
+    this.isReady = false;
+  }
+
+  addFromDamageDealt(damageAmount) {
+    this.#add(damageAmount * 0.5); // 준 피해의 절반만큼 게이지 축적
+  }
+
+  addFromDamageTaken(damageAmount) {
+    this.#add(damageAmount * 0.3); // 받은 피해는 조금 더 적게 축적 (공격 위주 축적을 유도)
+  }
+
+  addFromSupportAction(fixedAmount) {
+    this.#add(fixedAmount);
+  }
+
+  #add(amount) {
+    if (this.isReady) return; // 이미 가득 찼으면 더 안 채움 (사용해야 다시 채워짐)
+    this.value = Math.min(UltimateGauge.MAX_VALUE, this.value + amount);
+    if (this.value >= UltimateGauge.MAX_VALUE) {
+      this.isReady = true;
+      GameEventBus.publish(CombatEvents.ULTIMATE_READY, {});
+    }
+  }
+
+  consume() {
+    if (!this.isReady) {
+      console.warn("[UltimateGauge] 아직 게이지가 다 차지 않았는데 사용 시도됨");
+      return false;
+    }
+    this.value = 0;
+    this.isReady = false;
+    return true;
+  }
+}
+
+// ---------- SkillDefinition ----------
+// 스킬 하나의 정의. 실제 효과는 콜백(effectFn)으로 주입 - 스킬마다 클래스를 새로 만들지 않기 위함.
+class SkillDefinition {
+  constructor({ id, name, cooldownTurns, isUltimate = false, effectFn }) {
+    this.id = id;
+    this.name = name;
+    this.cooldownTurns = cooldownTurns;
+    this.isUltimate = isUltimate;
+    this.effectFn = effectFn; // (caster, target) => void
+  }
+}
+
+// ---------- CombatUnit ----------
+// IDamageable 개념(Part 1)을 웹 버전 클래스로 구현.
+// OriginRuntimeState(Part 2)의 getComputedStats()를 그대로 받아 전투 스탯의 기준으로 삼는다.
+class CombatUnit {
+  constructor(name, baseStats) {
+    this.name = name;
+    this.maxHealth = baseStats.maxHealth;
+    this.currentHealth = baseStats.maxHealth;
+    this.baseAttack = baseStats.attack;
+    this.baseDefense = baseStats.defense;
+
+    this.statusEffects = new StatusEffectManager(this);
+    this.ultimateGauge = new UltimateGauge();
+
+    // 스킬별 남은 쿨다운을 저장 (key: skillId, value: 남은 턴)
+    this.skillCooldowns = new Map();
+  }
+
+  get isDead() {
+    return this.currentHealth <= 0;
+  }
+
+  get effectiveAttack() {
+    return Math.round(this.baseAttack * this.statusEffects.getAttackMultiplier());
+  }
+
+  get effectiveDefense() {
+    return Math.round(this.baseDefense * this.statusEffects.getDefenseMultiplier());
+  }
+
+  takeDamage(rawAmount, inflictedEffect = StatusEffectType.NONE, effectDuration = 2, effectMagnitude = 1) {
+    // 방어력만큼 감소, 최소 1 데미지는 들어가도록 보정 (무적 방지)
+    const mitigated = Math.max(1, Math.round(rawAmount - this.effectiveDefense * 0.5));
+    this.currentHealth = Math.max(0, this.currentHealth - mitigated);
+
+    this.ultimateGauge.addFromDamageTaken(mitigated);
+
+    GameEventBus.publish(CombatEvents.DAMAGE_TAKEN, {
+      unit: this, amount: mitigated, remainingHealth: this.currentHealth
+    });
+
+    if (inflictedEffect !== StatusEffectType.NONE) {
+      this.statusEffects.apply(inflictedEffect, effectDuration, effectMagnitude);
+    }
+
+    if (this.isDead) {
+      GameEventBus.publish(CombatEvents.UNIT_DIED, { unit: this });
+    }
+
+    return mitigated;
+  }
+
+  heal(amount) {
+    const before = this.currentHealth;
+    this.currentHealth = Math.min(this.maxHealth, this.currentHealth + amount);
+    const actualHealed = this.currentHealth - before;
+    if (actualHealed > 0) {
+      GameEventBus.publish(CombatEvents.HEALED, { unit: this, amount: actualHealed });
+    }
+    return actualHealed;
+  }
+
+  // 기본 공격: 방어 무시 없는 단순 물리 데미지
+  basicAttack(target) {
+    const damage = this.effectiveAttack;
+    const dealt = target.takeDamage(damage);
+    this.ultimateGauge.addFromDamageDealt(dealt);
+    return dealt;
+  }
+
+  canUseSkill(skillId) {
+    if (this.statusEffects.isStunned()) return false; // 기절 중엔 스킬 사용 불가
+    const remaining = this.skillCooldowns.get(skillId) ?? 0;
+    return remaining <= 0;
+  }
+
+  useSkill(skill, target) {
+    if (!this.canUseSkill(skill.id)) {
+      console.warn(`[CombatUnit] ${this.name}이(가) ${skill.name} 사용 불가 (쿨다운 또는 기절 상태)`);
+      return false;
+    }
+
+    if (skill.isUltimate) {
+      const consumed = this.ultimateGauge.consume();
+      if (!consumed) return false;
+    }
+
+    skill.effectFn(this, target);
+    this.skillCooldowns.set(skill.id, skill.cooldownTurns);
+
+    GameEventBus.publish(CombatEvents.SKILL_USED, {
+      caster: this, skillId: skill.id, target
+    });
+
+    return true;
+  }
+
+  // 턴 종료 시 호출: 상태이상 틱 + 쿨다운 감소
+  endTurn() {
+    this.statusEffects.tickAll();
+    for (const [skillId, remaining] of this.skillCooldowns) {
+      if (remaining > 0) this.skillCooldowns.set(skillId, remaining - 1);
+    }
+  }
+}
+
+// ---------- Part 3 부팅 테스트 ----------
+function runPart3Tests() {
+  const results = [];
+
+  const attacker = new CombatUnit("Origin", { maxHealth: 100, attack: 20, defense: 5 });
+  const enemy = new CombatUnit("Blightleaf", { maxHealth: 60, attack: 10, defense: 8 });
+
+  const dealt = attacker.basicAttack(enemy);
+  results.push(`기본 공격 데미지 적용: ${enemy.currentHealth === 60 - dealt ? "PASS" : "FAIL"} (dealt=${dealt})`);
+
+  enemy.statusEffects.apply(StatusEffectType.BURN, 3, 5);
+  results.push(`화상 상태이상 부여: ${enemy.statusEffects.has(StatusEffectType.BURN) ? "PASS" : "FAIL"}`);
+
+  const beforeBurnTick = enemy.currentHealth;
+  enemy.endTurn(); // 화상 데미지 5 들어가야 함
+  results.push(`화상 틱 데미지: ${enemy.currentHealth === beforeBurnTick - 5 ? "PASS" : "FAIL"}`);
+
+  // 궁극기 게이지 테스트
+  const gaugeUnit = new CombatUnit("TestUnit", { maxHealth: 100, attack: 50, defense: 0 });
+  const dummy = new CombatUnit("Dummy", { maxHealth: 500, attack: 0, defense: 0 });
+  for (let i = 0; i < 10; i++) gaugeUnit.basicAttack(dummy); // 반복 공격으로 게이지 채우기
+  results.push(`궁극기 게이지 충전: ${gaugeUnit.ultimateGauge.isReady ? "PASS" : "FAIL"} (value=${gaugeUnit.ultimateGauge.value})`);
+
+  // 스킬 사용 + 쿨다운 테스트
+  const fireballSkill = new SkillDefinition({
+    id: "fireball",
+    name: "파이어볼",
+    cooldownTurns: 2,
+    effectFn: (caster, target) => { target.takeDamage(15, StatusEffectType.BURN, 2, 3); }
+  });
+
+  const caster = new CombatUnit("Caster", { maxHealth: 100, attack: 10, defense: 0 });
+  const target = new CombatUnit("Target", { maxHealth: 100, attack: 10, defense: 0 });
+  const usedFirst = caster.useSkill(fireballSkill, target);
+  const usedSecondImmediately = caster.useSkill(fireballSkill, target); // 쿨다운 때문에 실패해야 정상
+  results.push(`스킬 사용 성공: ${usedFirst ? "PASS" : "FAIL"}`);
+  results.push(`쿨다운 중 재사용 차단: ${!usedSecondImmediately ? "PASS" : "FAIL"}`);
+
+  // 기절 상태에서 스킬 사용 불가 테스트
+  const stunnedUnit = new CombatUnit("Stunned", { maxHealth: 100, attack: 10, defense: 0 });
+  stunnedUnit.statusEffects.apply(StatusEffectType.STUN, 1, 1);
+  results.push(`기절 중 스킬 차단: ${!stunnedUnit.canUseSkill(fireballSkill.id) ? "PASS" : "FAIL"}`);
+
+  return results;
+}
+  window.onload = () => {
+  const part1Results = runBootTests();
+  const part2Results = runPart2Tests();
+  const part3Results = runPart3Tests();
+  document.getElementById("log").textContent =
+    "=== Part 1: Core 시스템 ===\n" + part1Results.join("\n") +
+    "\n\n=== Part 2: Origin 데이터 구조 ===\n" + part2Results.join("\n") +
+    "\n\n=== Part 3: 전투 시스템 기초 ===\n" + part3Results.join("\n");
+};
 </script>
 </body>
 </html>
