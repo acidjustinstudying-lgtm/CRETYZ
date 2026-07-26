@@ -934,17 +934,148 @@ function runPart4Tests() {
 
   return results;
 }
-  window.onload = () => {
+  /* ============================================================
+   CRETYZ UI Controller - Part 5 / 1000 (실제 플레이 UI)
+   ============================================================ */
+
+let playerOrigin = OriginRuntimeState.load() || new OriginRuntimeState();
+let worldTree = WorldTreeState.load() || new WorldTreeState();
+
+const RegionDisplayNames = {
+  [RegionType.RESEARCH_LAB]: "연구소",
+  [RegionType.FORGOTTEN_GRASSLANDS]: "초원",
+  [RegionType.WHISPERING_MUSHROOM_FOREST]: "버섯숲",
+  [RegionType.SCORCHED_DESERT]: "사막",
+  [RegionType.FROZEN_VALLEY]: "설원",
+  [RegionType.BURNING_VOLCANO]: "화산",
+  [RegionType.LOST_FLOWER_CITY]: "꽃의 도시",
+  [RegionType.SKY_ISLANDS]: "하늘섬",
+  [RegionType.INSIDE_WORLD_TREE]: "세계수 내부",
+  [RegionType.ROOTS_OF_WORLD_TREE]: "세계수 뿌리"
+};
+
+const GrowthStageNames = {
+  [GrowthStage.SEED]: "씨앗",
+  [GrowthStage.SPROUT]: "새싹",
+  [GrowthStage.YOUNG_PLANT]: "유년기",
+  [GrowthStage.GROWING_PLANT]: "성장기",
+  [GrowthStage.BLOOMING_PLANT]: "개화",
+  [GrowthStage.MATURE_PLANT]: "성숙",
+  [GrowthStage.AWAKENED_ORIGIN]: "각성",
+  [GrowthStage.HEIR_OF_WORLD_TREE]: "세계수의 후계자"
+};
+
+const GrowthStageEmoji = {
+  [GrowthStage.SEED]: "🌰",
+  [GrowthStage.SPROUT]: "🌱",
+  [GrowthStage.YOUNG_PLANT]: "🌿",
+  [GrowthStage.GROWING_PLANT]: "☘️",
+  [GrowthStage.BLOOMING_PLANT]: "🌸",
+  [GrowthStage.MATURE_PLANT]: "🌳",
+  [GrowthStage.AWAKENED_ORIGIN]: "✨🌳",
+  [GrowthStage.HEIR_OF_WORLD_TREE]: "🌳🌟"
+};
+
+function refreshOriginUI() {
+  const stats = playerOrigin.getComputedStats();
+
+  document.getElementById("origin-visual").textContent = GrowthStageEmoji[playerOrigin.growthStage];
+  document.getElementById("origin-name").textContent = `DNA ${playerOrigin.dna.dnaCode}`;
+  document.getElementById("origin-stage").textContent =
+    `단계: ${GrowthStageNames[playerOrigin.growthStage]} / 스타일: ${playerOrigin.growthStyle}`;
+
+  document.getElementById("stat-attack").textContent = stats.attack;
+  document.getElementById("stat-defense").textContent = stats.defense;
+  document.getElementById("stat-hp").textContent = stats.maxHealth;
+
+  document.getElementById("affinity-bar-fill").style.width = `${playerOrigin.affinity}%`;
+}
+
+function refreshWorldTreeUI() {
+  document.getElementById("worldtree-level").textContent =
+    `세계수 레벨: ${WorldTreeLevelNames[worldTree.level]}`;
+  document.getElementById("worldtree-points").textContent =
+    `정화 포인트: ${worldTree.purificationPoints}`;
+
+  const listEl = document.getElementById("region-list");
+  listEl.innerHTML = "";
+  for (const regionKey in RegionDisplayNames) {
+    const region = Number(regionKey);
+    const chip = document.createElement("div");
+    chip.className = "region-chip" + (worldTree.isRegionUnlocked(region) ? " unlocked" : "");
+    chip.textContent = RegionDisplayNames[region];
+    listEl.appendChild(chip);
+  }
+}
+
+function refreshAllUI() {
+  refreshOriginUI();
+  refreshWorldTreeUI();
+}
+
+document.getElementById("btn-water").addEventListener("click", () => {
+  playerOrigin.water(1);
+  playerOrigin.increaseAffinity(1);
+  playerOrigin.save();
+  refreshOriginUI();
+});
+
+document.getElementById("btn-sunlight").addEventListener("click", () => {
+  playerOrigin.giveSunlight(1);
+  playerOrigin.increaseAffinity(1);
+  playerOrigin.save();
+  refreshOriginUI();
+});
+
+GameEventBus.subscribe(OriginEvents.GROWTH_STAGE_CHANGED, () => refreshOriginUI());
+GameEventBus.subscribe(WorldEvents.WORLD_TREE_LEVEL_UP, () => refreshWorldTreeUI());
+GameEventBus.subscribe(WorldEvents.REGION_UNLOCKED, () => refreshWorldTreeUI());
+
+window.onload = () => {
+  refreshAllUI();
+
   const part1Results = runBootTests();
   const part2Results = runPart2Tests();
   const part3Results = runPart3Tests();
   const part4Results = runPart4Tests();
   document.getElementById("log").textContent =
-    "=== Part 1: Core 시스템 ===\n" + part1Results.join("\n") +
-    "\n\n=== Part 2: Origin 데이터 구조 ===\n" + part2Results.join("\n") +
-    "\n\n=== Part 3: 전투 시스템 기초 ===\n" + part3Results.join("\n") +
-    "\n\n=== Part 4: 세계수 & 지역 언락 ===\n" + part4Results.join("\n");
+    "=== Part 1 ===\n" + part1Results.join("\n") +
+    "\n\n=== Part 2 ===\n" + part2Results.join("\n") +
+    "\n\n=== Part 3 ===\n" + part3Results.join("\n") +
+    "\n\n=== Part 4 ===\n" + part4Results.join("\n");
 };
 </script>
 </body>
+  <h1>🌱 CRETYZ: The Last Seed</h1>
+
+<div id="origin-display">
+  <div id="origin-visual">🌰</div>
+  <div id="origin-name">-</div>
+  <div id="origin-stage">-</div>
+  <div id="stat-bar-row">
+    <div class="stat-box">공격 <span id="stat-attack">-</span></div>
+    <div class="stat-box">방어 <span id="stat-defense">-</span></div>
+    <div class="stat-box">체력 <span id="stat-hp">-</span></div>
+  </div>
+  <div id="affinity-bar-wrap">
+    <div>친밀도</div>
+    <div class="bar-outer"><div id="affinity-bar-fill" class="bar-fill"></div></div>
+  </div>
+</div>
+
+<div id="care-buttons">
+  <button id="btn-water">💧 물 주기</button>
+  <button id="btn-sunlight">☀️ 햇빛 주기</button>
+</div>
+
+<div id="worldtree-panel">
+  <div id="worldtree-level">-</div>
+  <div id="worldtree-points">-</div>
+  <div id="region-list"></div>
+</div>
+
+<div id="log-panel">
+  <div id="log-title">개발자 로그 (테스트 결과)</div>
+  <div id="log"></div>
+</div>
 </html>
