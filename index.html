@@ -1106,6 +1106,197 @@ window.addEventListener("load", () => {
     "\n\n=== Part 3 ===\n" + part3Results.join("\n") +
     "\n\n=== Part 4 ===\n" + part4Results.join("\n");
 });
+  /* ============================================================
+   CRETYZ Core - Part 7 / 1000 (대화 시스템 & 프롤로그)
+   ============================================================ */
+
+const StoryEvents = Object.freeze({
+  DIALOGUE_STARTED: "OnDialogueStarted",
+  DIALOGUE_ENDED: "OnDialogueEnded",
+  STORY_FLAG_SET: "OnStoryFlagSet"
+});
+
+// ---------- StoryFlags ----------
+// 특정 대화/이벤트가 "이미 일어났는지"를 기억하는 저장소.
+// 프롤로그를 매번 다시 보여주지 않기 위해, 그리고 이후 파트의 분기 조건으로도 재사용.
+class StoryFlags {
+  static SAVE_KEY = "cretyz_story_flags";
+
+  constructor() {
+    this.flags = new Set();
+  }
+
+  has(flagName) {
+    return this.flags.has(flagName);
+  }
+
+  set(flagName) {
+    if (this.flags.has(flagName)) return; // 이미 설정된 플래그는 중복 이벤트 발행 안 함
+    this.flags.add(flagName);
+    GameEventBus.publish(StoryEvents.STORY_FLAG_SET, { flagName });
+    this.save();
+  }
+
+  toJSON() {
+    return { flags: Array.from(this.flags) };
+  }
+
+  static fromJSON(json) {
+    const state = new StoryFlags();
+    state.flags = new Set(json.flags);
+    return state;
+  }
+
+  save() {
+    try {
+      localStorage.setItem(StoryFlags.SAVE_KEY, JSON.stringify(this.toJSON()));
+      return true;
+    } catch (err) {
+      console.error("[StoryFlags] 저장 실패:", err);
+      return false;
+    }
+  }
+
+  static load() {
+    try {
+      const raw = localStorage.getItem(StoryFlags.SAVE_KEY);
+      if (!raw) return null;
+      return StoryFlags.fromJSON(JSON.parse(raw));
+    } catch (err) {
+      console.error("[StoryFlags] 로드 실패:", err);
+      return null;
+    }
+  }
+}
+
+// ---------- 캐릭터 정의 ----------
+// 초상화는 그래픽 리소스 없이도 감정을 전달하기 위해 이모지로 대체 (추후 실제 일러스트로 교체 예정)
+const StoryCharacters = Object.freeze({
+  JUSTIN: { name: "저스틴 박사", portrait: "🧑‍🔬" },
+  EDEN:   { name: "에덴", portrait: "🕴️" },
+  NARRATOR: { name: "", portrait: "" }
+});
+
+// ---------- 대화 시퀀스 데이터 ----------
+// 각 장면은 { speaker, text } 라인의 배열. 실제 스토리 원문 톤을 최대한 살리되
+// 감정의 핵심 대사만 남기고 나머지는 지문으로 압축.
+const StoryScenes = {
+  PROLOGUE: [
+    { speaker: StoryCharacters.NARRATOR, text: "세계수가 병들어가던 어느 날, 연구소 깊숙한 곳." },
+    { speaker: StoryCharacters.JUSTIN, text: "다른 씨앗들은... 전부 오염됐네. 이 아이만 빼고." },
+    { speaker: StoryCharacters.JUSTIN, text: "이 씨앗을 자네에게 맡기고 싶네." },
+    { speaker: StoryCharacters.JUSTIN, text: "그냥 키우는 게 아니라... 자네 목숨처럼 아껴주게." },
+    { speaker: StoryCharacters.NARRATOR, text: "그렇게, 이름 없는 씨앗 하나가 당신의 손에 들어왔다." },
+    { speaker: StoryCharacters.JUSTIN, text: "어쩌면... 이 작은 아이가 세상을 바꿀지도 모르지." }
+  ],
+  FIRST_BLIGHT_CORE: [
+    { speaker: StoryCharacters.JUSTIN, text: "해냈군. 방금 그게, 자네의 첫 정화일세." },
+    { speaker: StoryCharacters.JUSTIN, text: "이 핵을 세계수께 돌려주거나, 내가 연구해볼 수도 있네. 자네가 정하게." },
+    { speaker: StoryCharacters.JUSTIN, text: "그리고... 오늘부로 세계를 구할 사람은 자네뿐이라는 걸, 잊지 말게." }
+  ],
+  EDEN_FIRST_GLIMPSE: [
+    { speaker: StoryCharacters.NARRATOR, text: "저 멀리, 검게 물든 그림자 하나가 당신을 지켜보고 있었다." },
+    { speaker: StoryCharacters.EDEN, text: "...아직도, 그 어린 씨앗을 키우고 있나." },
+    { speaker: StoryCharacters.EDEN, text: "부질없는 짓이야. 인간은 변하지 않아." }
+  ]
+};
+
+// ---------- DialogueBox (자가생성 UI) ----------
+(function initPart7() {
+  const style = document.createElement("style");
+  style.textContent = `
+    #dialogue-overlay {
+      display:none; position:fixed; left:0; right:0; bottom:0;
+      background:rgba(10,20,12,0.97); padding:18px 20px; border-top:2px solid #3C6E32;
+      z-index:1000;
+    }
+    #dialogue-speaker { font-weight:bold; color:#B6F09C; margin-bottom:6px; font-size:15px; }
+    #dialogue-portrait { font-size:32px; float:left; margin-right:12px; }
+    #dialogue-text { font-size:15px; line-height:1.5; min-height:44px; }
+    #dialogue-next-btn {
+      margin-top:12px; background:#3C6E32; color:#eafbe7; border:none;
+      padding:8px 18px; border-radius:8px; cursor:pointer; float:right; font-size:14px;
+    }
+    #dialogue-clear { clear:both; }
+  `;
+  document.head.appendChild(style);
+
+  const overlay = document.createElement("div");
+  overlay.id = "dialogue-overlay";
+  overlay.innerHTML = `
+    <div id="dialogue-portrait"></div>
+    <div id="dialogue-speaker"></div>
+    <div id="dialogue-text"></div>
+    <div id="dialogue-clear"></div>
+    <button id="dialogue-next-btn">다음 ▶</button>
+  `;
+  document.body.appendChild(overlay);
+
+  let activeScene = null;
+  let activeLineIndex = 0;
+
+  window.playDialogue = function playDialogue(sceneId) {
+    const scene = StoryScenes[sceneId];
+    if (!scene) {
+      console.warn(`[Dialogue] 존재하지 않는 장면: ${sceneId}`);
+      return;
+    }
+    activeScene = scene;
+    activeLineIndex = 0;
+    overlay.style.display = "block";
+    GameEventBus.publish(StoryEvents.DIALOGUE_STARTED, { sceneId });
+    renderCurrentLine();
+  };
+
+  function renderCurrentLine() {
+    const line = activeScene[activeLineIndex];
+    document.getElementById("dialogue-portrait").textContent = line.speaker.portrait;
+    document.getElementById("dialogue-speaker").textContent = line.speaker.name;
+    document.getElementById("dialogue-text").textContent = line.text;
+  }
+
+  document.getElementById("dialogue-next-btn").addEventListener("click", () => {
+    activeLineIndex += 1;
+    if (activeLineIndex >= activeScene.length) {
+      overlay.style.display = "none";
+      GameEventBus.publish(StoryEvents.DIALOGUE_ENDED, {});
+      activeScene = null;
+      return;
+    }
+    renderCurrentLine();
+  });
+})();
+
+// ---------- 스토리 진행 트리거 ----------
+let storyFlags = StoryFlags.load() || new StoryFlags();
+
+// 프롤로그: 게임을 처음 켰을 때 한 번만
+function tryTriggerPrologue() {
+  if (!storyFlags.has("seen_prologue")) {
+    playDialogue("PROLOGUE");
+    storyFlags.set("seen_prologue");
+  }
+}
+
+// 첫 오염핵 획득 시 저스틴의 대사 (Part 6의 이벤트를 그대로 재사용)
+GameEventBus.subscribe(WorldEvents.BLIGHT_CORE_OBTAINED, (e) => {
+  if (e.total === 1 && !storyFlags.has("seen_first_core_dialogue")) {
+    playDialogue("FIRST_BLIGHT_CORE");
+    storyFlags.set("seen_first_core_dialogue");
+  }
+});
+
+// 세계수 레벨업 시(=사막 지역 등 언락 시점 근처) 에덴이 처음 모습을 비춤
+GameEventBus.subscribe(WorldEvents.WORLD_TREE_LEVEL_UP, (e) => {
+  if (e.newLevel === WorldTreeLevel.FIRST_SPROUT && !storyFlags.has("seen_eden_glimpse")) {
+    playDialogue("EDEN_FIRST_GLIMPSE");
+    storyFlags.set("seen_eden_glimpse");
+  }
+});
+
+window.addEventListener("load", () => {
+  tryTriggerPrologue();
+});
 </script>
 </body>
 </html>
