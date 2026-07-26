@@ -164,6 +164,269 @@ window.onload = () => {
   document.getElementById("log").textContent =
     "CRETYZ Part 1 / 1000 - Core 시스템 부팅 완료\n\n" + results.join("\n");
 };
+  /* ============================================================
+   CRETYZ Core - Part 2 / 1000 (Origin 데이터 구조)
+   ============================================================ */
+
+// ---------- Origin 성장 이벤트 정의 ----------
+// (이벤트 이름은 문자열 상수로 관리 - 오타 방지 + 자동완성 지원)
+const OriginEvents = Object.freeze({
+  WATERED: "OnOriginWatered",
+  SUNLIGHT: "OnOriginSunlight",
+  GROWTH_STAGE_CHANGED: "OnOriginGrowthStageChanged",
+  AFFINITY_CHANGED: "OnOriginAffinityChanged"
+});
+
+// ---------- OriginStatsTable ----------
+// Unity의 ScriptableObject 데이터 테이블 역할. 성장 단계별 기본 스탯.
+// 실제 밸런스 수치는 나중 파트(전투 시스템)에서 조정하고, 지금은 구조만 확정.
+const OriginStatsTable = {
+  // key: GrowthStage 값, value: 기본 스탯
+  [GrowthStage.SEED]:               { maxHealth: 20,  attack: 2,  defense: 2  },
+  [GrowthStage.SPROUT]:             { maxHealth: 35,  attack: 4,  defense: 3  },
+  [GrowthStage.YOUNG_PLANT]:        { maxHealth: 55,  attack: 7,  defense: 5  },
+  [GrowthStage.GROWING_PLANT]:      { maxHealth: 80,  attack: 11, defense: 8  },
+  [GrowthStage.BLOOMING_PLANT]:     { maxHealth: 110, attack: 16, defense: 12 },
+  [GrowthStage.MATURE_PLANT]:       { maxHealth: 150, attack: 22, defense: 17 },
+  [GrowthStage.AWAKENED_ORIGIN]:    { maxHealth: 200, attack: 30, defense: 24 },
+  [GrowthStage.HEIR_OF_WORLD_TREE]: { maxHealth: 260, attack: 40, defense: 32 }
+};
+
+// 성장 스타일에 따른 스탯 배율. Balanced는 배율 1.0으로 기준점.
+const GrowthStyleModifiers = {
+  [GrowthStyle.OFFENSIVE]: { attackMult: 1.3, defenseMult: 0.85, healthMult: 0.9  },
+  [GrowthStyle.DEFENSIVE]: { attackMult: 0.8,  defenseMult: 1.35, healthMult: 1.15 },
+  [GrowthStyle.SUPPORT]:   { attackMult: 0.75, defenseMult: 1.0,  healthMult: 1.05 },
+  [GrowthStyle.BALANCED]:  { attackMult: 1.0,  defenseMult: 1.0,  healthMult: 1.0  }
+};
+
+// ---------- OriginDNA ----------
+// 코스메틱 전용 (전투 밸런스에 영향 없음). 매 오리진마다 고유한 외형을 만든다.
+class OriginDNA {
+  static LEAF_SHAPES = ["Round", "Long", "Serrated", "Split", "HeartShaped", "StarShaped"];
+  static STEM_TYPES = ["Thin", "Thick", "Curved", "Twisted"];
+  static FLOWER_TYPES = ["None", "Small", "Large", "MultipleBlossoms"];
+  static COLORS = ["Green", "LightGreen", "Mint", "Blue", "Purple", "Black", "Gold", "Rainbow"];
+  static EYE_STYLES = ["Round", "Sleepy", "Star", "Angry", "Sparkling"];
+  static PERSONALITIES = ["Cheerful", "Calm", "Curious", "Brave", "Playful", "Shy", "Confident", "Lazy"];
+
+  constructor(seedValue = null) {
+    // seedValue를 넣으면 동일한 DNA를 재현 가능 (세이브 로드용), 없으면 랜덤 생성
+    this.rngSeed = seedValue ?? Math.floor(Math.random() * 0xFFFFFFFF);
+    const rng = OriginDNA.#createSeededRandom(this.rngSeed);
+
+    this.leafShape = OriginDNA.#pick(rng, OriginDNA.LEAF_SHAPES);
+    this.stemType = OriginDNA.#pick(rng, OriginDNA.STEM_TYPES);
+    this.flowerType = OriginDNA.#pick(rng, OriginDNA.FLOWER_TYPES);
+    this.color = OriginDNA.#pick(rng, OriginDNA.COLORS);
+    this.eyeStyle = OriginDNA.#pick(rng, OriginDNA.EYE_STYLES);
+    this.personality = OriginDNA.#pick(rng, OriginDNA.PERSONALITIES);
+
+    this.dnaCode = this.#generateDnaCode();
+  }
+
+  // 시드 기반 의사난수 생성기 (Math.random은 시드 고정이 안 되므로 직접 구현)
+  static #createSeededRandom(seed) {
+    let state = seed >>> 0;
+    return function () {
+      state = (state * 1664525 + 1013904223) >>> 0;
+      return state / 0xFFFFFFFF;
+    };
+  }
+
+  static #pick(rng, array) {
+    const idx = Math.floor(rng() * array.length);
+    return array[idx];
+  }
+
+  // 사람이 보기엔 의미 없는 16진수 코드지만, 내부적으로는 seed를 그대로 인코딩
+  #generateDnaCode() {
+    const hex = this.rngSeed.toString(16).toUpperCase().padStart(8, "0");
+    return `#${hex.slice(0, 4)}-${hex.slice(4, 8)}`;
+  }
+
+  toJSON() {
+    return { rngSeed: this.rngSeed }; // 다른 필드는 rngSeed로부터 재생성 가능하므로 저장 불필요
+  }
+
+  static fromJSON(json) {
+    return new OriginDNA(json.rngSeed);
+  }
+}
+
+// ---------- OriginRuntimeState ----------
+// 실제 플레이 중 오리진의 성장 진행 상태. ISaveable 역할을 toJSON/fromJSON으로 대체.
+class OriginRuntimeState {
+  static SAVE_KEY = "cretyz_origin_save";
+
+  constructor() {
+    this.growthStage = GrowthStage.SEED;
+    this.growthStyle = GrowthStyle.BALANCED;
+    this.dna = new OriginDNA();
+
+    this.waterCount = 0;
+    this.sunlightCount = 0;
+    this.affinity = 0; // 0 ~ 100
+
+    // 성장 스타일 판정에 쓰이는 누적치. 물 비중이 높으면 공격형, 햇빛 비중이 높으면 방어형.
+    this.waterBias = 0;
+    this.sunlightBias = 0;
+  }
+
+  // ---- 상호작용 ----
+  water(amount = 1) {
+    this.waterCount += amount;
+    this.waterBias += amount;
+    this.#recalculateGrowthStyle();
+    GameEventBus.publish(OriginEvents.WATERED, { amount, totalWater: this.waterCount });
+    this.#tryAdvanceGrowthStage();
+  }
+
+  giveSunlight(amount = 1) {
+    this.sunlightCount += amount;
+    this.sunlightBias += amount;
+    this.#recalculateGrowthStyle();
+    GameEventBus.publish(OriginEvents.SUNLIGHT, { amount, totalSunlight: this.sunlightCount });
+    this.#tryAdvanceGrowthStage();
+  }
+
+  increaseAffinity(amount) {
+    const previous = this.affinity;
+    this.affinity = Math.min(100, this.affinity + amount);
+    if (this.affinity !== previous) {
+      GameEventBus.publish(OriginEvents.AFFINITY_CHANGED, { affinity: this.affinity });
+    }
+  }
+
+  // ---- 내부 판정 로직 ----
+  #recalculateGrowthStyle() {
+    const total = this.waterBias + this.sunlightBias;
+    if (total === 0) return;
+
+    const waterRatio = this.waterBias / total;
+
+    // 명세 기준: 물 위주 -> 공격형, 햇빛 위주 -> 방어형, 균형 -> 밸런스형
+    if (waterRatio >= 0.65) {
+      this.growthStyle = GrowthStyle.OFFENSIVE;
+    } else if (waterRatio <= 0.35) {
+      this.growthStyle = GrowthStyle.DEFENSIVE;
+    } else {
+      this.growthStyle = GrowthStyle.BALANCED;
+    }
+    // SUPPORT 스타일은 특정 아이템/이벤트로만 전환 (물/햇빛 비율만으로는 도달 불가) - Part 3 전투 파트에서 조건 확정
+  }
+
+  #tryAdvanceGrowthStage() {
+    const totalCare = this.waterCount + this.sunlightCount;
+    const thresholds = [3, 8, 15, 25, 40, 60, 85]; // 각 단계로 넘어가기 위한 누적 케어 횟수
+
+    const nextStageIndex = this.growthStage + 1;
+    if (nextStageIndex > GrowthStage.HEIR_OF_WORLD_TREE) return; // 이미 최종 단계
+
+    const requiredCare = thresholds[this.growthStage];
+    if (requiredCare !== undefined && totalCare >= requiredCare) {
+      const previousStage = this.growthStage;
+      this.growthStage = nextStageIndex;
+      GameEventBus.publish(OriginEvents.GROWTH_STAGE_CHANGED, {
+        previousStage, newStage: this.growthStage
+      });
+    }
+  }
+
+  // ---- 실제 전투 스탯 계산 ----
+  getComputedStats() {
+    const base = OriginStatsTable[this.growthStage];
+    const mod = GrowthStyleModifiers[this.growthStyle];
+    return {
+      maxHealth: Math.round(base.maxHealth * mod.healthMult),
+      attack: Math.round(base.attack * mod.attackMult),
+      defense: Math.round(base.defense * mod.defenseMult)
+    };
+  }
+
+  // ---- 저장 / 로드 ----
+  toJSON() {
+    return {
+      growthStage: this.growthStage,
+      growthStyle: this.growthStyle,
+      dna: this.dna.toJSON(),
+      waterCount: this.waterCount,
+      sunlightCount: this.sunlightCount,
+      affinity: this.affinity,
+      waterBias: this.waterBias,
+      sunlightBias: this.sunlightBias
+    };
+  }
+
+  static fromJSON(json) {
+    const state = new OriginRuntimeState();
+    state.growthStage = json.growthStage;
+    state.growthStyle = json.growthStyle;
+    state.dna = OriginDNA.fromJSON(json.dna);
+    state.waterCount = json.waterCount;
+    state.sunlightCount = json.sunlightCount;
+    state.affinity = json.affinity;
+    state.waterBias = json.waterBias;
+    state.sunlightBias = json.sunlightBias;
+    return state;
+  }
+
+  save() {
+    try {
+      localStorage.setItem(OriginRuntimeState.SAVE_KEY, JSON.stringify(this.toJSON()));
+      return true;
+    } catch (err) {
+      console.error("[OriginRuntimeState] 저장 실패:", err);
+      return false;
+    }
+  }
+
+  static load() {
+    try {
+      const raw = localStorage.getItem(OriginRuntimeState.SAVE_KEY);
+      if (!raw) return null; // 저장된 게 없음 - 정상 상황 (첫 실행)
+      return OriginRuntimeState.fromJSON(JSON.parse(raw));
+    } catch (err) {
+      console.error("[OriginRuntimeState] 로드 실패, 손상된 세이브로 판단:", err);
+      return null;
+    }
+  }
+}
+
+// ---------- Part 2 부팅 테스트 ----------
+function runPart2Tests() {
+  const results = [];
+
+  const state = new OriginRuntimeState();
+  results.push(`초기 성장 단계 SEED: ${state.growthStage === GrowthStage.SEED ? "PASS" : "FAIL"}`);
+
+  state.water(2);
+  state.giveSunlight(1);
+  results.push(`물/햇빛 카운트 반영: ${state.waterCount === 2 && state.sunlightCount === 1 ? "PASS" : "FAIL"}`);
+
+  // 성장 단계 이행 테스트 (3회 케어 시 SPROUT로)
+  results.push(`성장 단계 이행(SPROUT): ${state.growthStage === GrowthStage.SPROUT ? "PASS" : "FAIL"}`);
+
+  const dna1 = new OriginDNA(12345);
+  const dna2 = new OriginDNA(12345);
+  results.push(`DNA 시드 재현성: ${dna1.dnaCode === dna2.dnaCode ? "PASS" : "FAIL"}`);
+
+  const stats = state.getComputedStats();
+  results.push(`전투 스탯 계산 (attack=${stats.attack}, defense=${stats.defense}, hp=${stats.maxHealth})`);
+
+  const saved = state.save();
+  const loaded = OriginRuntimeState.load();
+  results.push(`저장/로드 왕복: ${saved && loaded && loaded.dna.dnaCode === state.dna.dnaCode ? "PASS" : "FAIL"}`);
+
+  return results;
+}
+  window.onload = () => {
+  const part1Results = runBootTests();
+  const part2Results = runPart2Tests();
+  document.getElementById("log").textContent =
+    "=== Part 1: Core 시스템 ===\n" + part1Results.join("\n") +
+    "\n\n=== Part 2: Origin 데이터 구조 ===\n" + part2Results.join("\n");
+};
 </script>
 </body>
 </html>
