@@ -1,0 +1,1001 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>CRETYZ: The Last Seed</title>
+<style>
+  body { background:#0e1a12; color:#eafbe7; font-family: sans-serif; margin:0; padding:20px; }
+  #log { white-space: pre-wrap; background:#132018; padding:12px; border-radius:8px; font-size:13px; }
+  #origin-display { text-align:center; margin: 20px 0; }
+  #origin-visual { font-size: 80px; }
+  #origin-name { font-size: 20px; margin-top:8px; }
+  #origin-stage { color:#9fd88a; margin-bottom:12px; }
+  #stat-bar-row { display:flex; justify-content:center; gap:16px; margin-bottom:12px; }
+  .stat-box { background:#1c2b1f; padding:8px 14px; border-radius:8px; font-size:14px; }
+  #affinity-bar-wrap { max-width:300px; margin:0 auto; }
+  .bar-outer { background:#1c2b1f; border-radius:8px; height:14px; overflow:hidden; margin-top:4px; }
+  .bar-fill { background:#7ED957; height:100%; width:0%; transition: width 0.3s; }
+  #care-buttons { text-align:center; margin: 20px 0; }
+  #care-buttons button {
+    background:#3C6E32; color:#eafbe7; border:none; padding:14px 22px;
+    margin: 0 8px; border-radius:10px; font-size:16px; cursor:pointer;
+  }
+  #care-buttons button:active { background:#5FA850; }
+  #worldtree-panel {
+    max-width: 400px; margin: 20px auto; background:#132018; padding:14px; border-radius:10px; font-size:14px;
+  }
+  #region-list { margin-top:8px; display:flex; flex-wrap:wrap; gap:6px; }
+  .region-chip { background:#1c2b1f; padding:4px 10px; border-radius:20px; font-size:12px; }
+  .region-chip.unlocked { background:#3C6E32; }
+  #log-panel { margin-top:30px; }
+  #log-title { font-size:12px; color:#6a8a63; margin-bottom:6px; }
+</style>
+</head>
+<body>
+<h1>🌱 CRETYZ: The Last Seed</h1>
+
+<div id="origin-display">
+  <div id="origin-visual">🌰</div>
+  <div id="origin-name">-</div>
+  <div id="origin-stage">-</div>
+  <div id="stat-bar-row">
+    <div class="stat-box">공격 <span id="stat-attack">-</span></div>
+    <div class="stat-box">방어 <span id="stat-defense">-</span></div>
+    <div class="stat-box">체력 <span id="stat-hp">-</span></div>
+  </div>
+  <div id="affinity-bar-wrap">
+    <div>친밀도</div>
+    <div class="bar-outer"><div id="affinity-bar-fill" class="bar-fill"></div></div>
+  </div>
+</div>
+
+<div id="care-buttons">
+  <button id="btn-water">💧 물 주기</button>
+  <button id="btn-sunlight">☀️ 햇빛 주기</button>
+</div>
+
+<div id="worldtree-panel">
+  <div id="worldtree-level">-</div>
+  <div id="worldtree-points">-</div>
+  <div id="region-list"></div>
+</div>
+
+<div id="log-panel">
+  <div id="log-title">개발자 로그 (테스트 결과)</div>
+  <div id="log"></div>
+</div>
+
+<script>
+/* ============================================================
+   CRETYZ Core - Part 1 / 1000 (Web/JS 버전)
+   ============================================================ */
+
+const GrowthStage = Object.freeze({
+  SEED: 0, SPROUT: 1, YOUNG_PLANT: 2, GROWING_PLANT: 3,
+  BLOOMING_PLANT: 4, MATURE_PLANT: 5, AWAKENED_ORIGIN: 6, HEIR_OF_WORLD_TREE: 7
+});
+
+const GrowthStyle = Object.freeze({
+  OFFENSIVE: "OFFENSIVE", DEFENSIVE: "DEFENSIVE", SUPPORT: "SUPPORT", BALANCED: "BALANCED"
+});
+
+const RegionType = Object.freeze({
+  RESEARCH_LAB: 0, FORGOTTEN_GRASSLANDS: 1, MUSHROOM_FOREST: 2, SCORCHED_DESERT: 3,
+  FROZEN_VALLEY: 4, BURNING_VOLCANO: 5, LOST_FLOWER_CITY: 6, SKY_ISLANDS: 7,
+  INSIDE_WORLD_TREE: 8, ROOTS_OF_WORLD_TREE: 9
+});
+
+const DifficultyLevel = Object.freeze({
+  EASY: "EASY", NORMAL: "NORMAL", HARD: "HARD", NIGHTMARE: "NIGHTMARE",
+  BLIGHT: "BLIGHT", WORLD_TREE: "WORLD_TREE"
+});
+
+const StatusEffectType = Object.freeze({
+  NONE: 0, BURN: 1 << 0, FREEZE: 1 << 1, POISON: 1 << 2, SLOW: 1 << 3,
+  STUN: 1 << 4, REGENERATION: 1 << 5, DEFENSE_BOOST: 1 << 6, ATTACK_BOOST: 1 << 7
+});
+
+class GameEventBus {
+  static #subscribers = new Map();
+
+  static subscribe(eventName, handler) {
+    if (!this.#subscribers.has(eventName)) {
+      this.#subscribers.set(eventName, []);
+    }
+    this.#subscribers.get(eventName).push(handler);
+  }
+
+  static unsubscribe(eventName, handler) {
+    if (!this.#subscribers.has(eventName)) return;
+    const list = this.#subscribers.get(eventName);
+    const idx = list.indexOf(handler);
+    if (idx !== -1) list.splice(idx, 1);
+    if (list.length === 0) this.#subscribers.delete(eventName);
+  }
+
+  static publish(eventName, payload) {
+    if (!this.#subscribers.has(eventName)) return;
+    const snapshot = [...this.#subscribers.get(eventName)];
+    for (const handler of snapshot) {
+      try {
+        handler(payload);
+      } catch (err) {
+        console.error(`[GameEventBus] ${eventName} 처리 중 예외:`, err);
+      }
+    }
+  }
+
+  static clearAll() {
+    this.#subscribers.clear();
+  }
+}
+
+class GameManager {
+  static #instance = null;
+  #currentDifficulty = DifficultyLevel.NORMAL;
+
+  static get instance() {
+    if (!this.#instance) this.#instance = new GameManager();
+    return this.#instance;
+  }
+
+  get currentDifficulty() { return this.#currentDifficulty; }
+
+  setDifficulty(level) {
+    this.#currentDifficulty = level;
+    GameEventBus.publish("OnDifficultyChanged", { level });
+  }
+}
+
+class StateMachine {
+  #currentState = null;
+  get currentState() { return this.#currentState; }
+
+  changeState(newState) {
+    if (!newState) {
+      console.warn("[StateMachine] null 상태로 전환 시도 - 무시함");
+      return;
+    }
+    if (this.#currentState && this.#currentState.onExit) this.#currentState.onExit();
+    this.#currentState = newState;
+    if (this.#currentState.onEnter) this.#currentState.onEnter();
+  }
+
+  tick(deltaTime) {
+    if (this.#currentState && this.#currentState.onUpdate) {
+      this.#currentState.onUpdate(deltaTime);
+    }
+  }
+}
+
+function runBootTests() {
+  const results = [];
+
+  let received = null;
+  const handler = (e) => { received = e.value; };
+  GameEventBus.subscribe("TestEvent", handler);
+  GameEventBus.publish("TestEvent", { value: 42 });
+  results.push(`이벤트 버스 발행/구독: ${received === 42 ? "PASS" : "FAIL"}`);
+  GameEventBus.unsubscribe("TestEvent", handler);
+
+  let callCount = 0;
+  const handler2 = () => { callCount++; };
+  GameEventBus.subscribe("TestEvent2", handler2);
+  GameEventBus.unsubscribe("TestEvent2", handler2);
+  GameEventBus.publish("TestEvent2", {});
+  results.push(`이벤트 버스 구독 해제: ${callCount === 0 ? "PASS" : "FAIL"}`);
+
+  const gm1 = GameManager.instance;
+  const gm2 = GameManager.instance;
+  results.push(`GameManager 싱글톤: ${gm1 === gm2 ? "PASS" : "FAIL"}`);
+
+  gm1.setDifficulty(DifficultyLevel.HARD);
+  results.push(`난이도 설정: ${gm1.currentDifficulty === DifficultyLevel.HARD ? "PASS" : "FAIL"}`);
+
+  return results;
+}
+
+/* ============================================================
+   CRETYZ Core - Part 2 / 1000 (Origin 데이터 구조)
+   ============================================================ */
+
+const OriginEvents = Object.freeze({
+  WATERED: "OnOriginWatered",
+  SUNLIGHT: "OnOriginSunlight",
+  GROWTH_STAGE_CHANGED: "OnOriginGrowthStageChanged",
+  AFFINITY_CHANGED: "OnOriginAffinityChanged"
+});
+
+const OriginStatsTable = {
+  [GrowthStage.SEED]:               { maxHealth: 20,  attack: 2,  defense: 2  },
+  [GrowthStage.SPROUT]:             { maxHealth: 35,  attack: 4,  defense: 3  },
+  [GrowthStage.YOUNG_PLANT]:        { maxHealth: 55,  attack: 7,  defense: 5  },
+  [GrowthStage.GROWING_PLANT]:      { maxHealth: 80,  attack: 11, defense: 8  },
+  [GrowthStage.BLOOMING_PLANT]:     { maxHealth: 110, attack: 16, defense: 12 },
+  [GrowthStage.MATURE_PLANT]:       { maxHealth: 150, attack: 22, defense: 17 },
+  [GrowthStage.AWAKENED_ORIGIN]:    { maxHealth: 200, attack: 30, defense: 24 },
+  [GrowthStage.HEIR_OF_WORLD_TREE]: { maxHealth: 260, attack: 40, defense: 32 }
+};
+
+const GrowthStyleModifiers = {
+  [GrowthStyle.OFFENSIVE]: { attackMult: 1.3, defenseMult: 0.85, healthMult: 0.9  },
+  [GrowthStyle.DEFENSIVE]: { attackMult: 0.8,  defenseMult: 1.35, healthMult: 1.15 },
+  [GrowthStyle.SUPPORT]:   { attackMult: 0.75, defenseMult: 1.0,  healthMult: 1.05 },
+  [GrowthStyle.BALANCED]:  { attackMult: 1.0,  defenseMult: 1.0,  healthMult: 1.0  }
+};
+
+class OriginDNA {
+  static LEAF_SHAPES = ["Round", "Long", "Serrated", "Split", "HeartShaped", "StarShaped"];
+  static STEM_TYPES = ["Thin", "Thick", "Curved", "Twisted"];
+  static FLOWER_TYPES = ["None", "Small", "Large", "MultipleBlossoms"];
+  static COLORS = ["Green", "LightGreen", "Mint", "Blue", "Purple", "Black", "Gold", "Rainbow"];
+  static EYE_STYLES = ["Round", "Sleepy", "Star", "Angry", "Sparkling"];
+  static PERSONALITIES = ["Cheerful", "Calm", "Curious", "Brave", "Playful", "Shy", "Confident", "Lazy"];
+
+  constructor(seedValue = null) {
+    this.rngSeed = seedValue ?? Math.floor(Math.random() * 0xFFFFFFFF);
+    const rng = OriginDNA.#createSeededRandom(this.rngSeed);
+
+    this.leafShape = OriginDNA.#pick(rng, OriginDNA.LEAF_SHAPES);
+    this.stemType = OriginDNA.#pick(rng, OriginDNA.STEM_TYPES);
+    this.flowerType = OriginDNA.#pick(rng, OriginDNA.FLOWER_TYPES);
+    this.color = OriginDNA.#pick(rng, OriginDNA.COLORS);
+    this.eyeStyle = OriginDNA.#pick(rng, OriginDNA.EYE_STYLES);
+    this.personality = OriginDNA.#pick(rng, OriginDNA.PERSONALITIES);
+
+    this.dnaCode = this.#generateDnaCode();
+  }
+
+  static #createSeededRandom(seed) {
+    let state = seed >>> 0;
+    return function () {
+      state = (state * 1664525 + 1013904223) >>> 0;
+      return state / 0xFFFFFFFF;
+    };
+  }
+
+  static #pick(rng, array) {
+    const idx = Math.floor(rng() * array.length);
+    return array[idx];
+  }
+
+  #generateDnaCode() {
+    const hex = this.rngSeed.toString(16).toUpperCase().padStart(8, "0");
+    return `#${hex.slice(0, 4)}-${hex.slice(4, 8)}`;
+  }
+
+  toJSON() {
+    return { rngSeed: this.rngSeed };
+  }
+
+  static fromJSON(json) {
+    return new OriginDNA(json.rngSeed);
+  }
+}
+
+class OriginRuntimeState {
+  static SAVE_KEY = "cretyz_origin_save";
+
+  constructor() {
+    this.growthStage = GrowthStage.SEED;
+    this.growthStyle = GrowthStyle.BALANCED;
+    this.dna = new OriginDNA();
+
+    this.waterCount = 0;
+    this.sunlightCount = 0;
+    this.affinity = 0;
+
+    this.waterBias = 0;
+    this.sunlightBias = 0;
+  }
+
+  water(amount = 1) {
+    this.waterCount += amount;
+    this.waterBias += amount;
+    this.#recalculateGrowthStyle();
+    GameEventBus.publish(OriginEvents.WATERED, { amount, totalWater: this.waterCount });
+    this.#tryAdvanceGrowthStage();
+  }
+
+  giveSunlight(amount = 1) {
+    this.sunlightCount += amount;
+    this.sunlightBias += amount;
+    this.#recalculateGrowthStyle();
+    GameEventBus.publish(OriginEvents.SUNLIGHT, { amount, totalSunlight: this.sunlightCount });
+    this.#tryAdvanceGrowthStage();
+  }
+
+  increaseAffinity(amount) {
+    const previous = this.affinity;
+    this.affinity = Math.min(100, this.affinity + amount);
+    if (this.affinity !== previous) {
+      GameEventBus.publish(OriginEvents.AFFINITY_CHANGED, { affinity: this.affinity });
+    }
+  }
+
+  #recalculateGrowthStyle() {
+    const total = this.waterBias + this.sunlightBias;
+    if (total === 0) return;
+
+    const waterRatio = this.waterBias / total;
+
+    if (waterRatio >= 0.65) {
+      this.growthStyle = GrowthStyle.OFFENSIVE;
+    } else if (waterRatio <= 0.35) {
+      this.growthStyle = GrowthStyle.DEFENSIVE;
+    } else {
+      this.growthStyle = GrowthStyle.BALANCED;
+    }
+  }
+
+  #tryAdvanceGrowthStage() {
+    const totalCare = this.waterCount + this.sunlightCount;
+    const thresholds = [3, 8, 15, 25, 40, 60, 85];
+
+    const nextStageIndex = this.growthStage + 1;
+    if (nextStageIndex > GrowthStage.HEIR_OF_WORLD_TREE) return;
+
+    const requiredCare = thresholds[this.growthStage];
+    if (requiredCare !== undefined && totalCare >= requiredCare) {
+      const previousStage = this.growthStage;
+      this.growthStage = nextStageIndex;
+      GameEventBus.publish(OriginEvents.GROWTH_STAGE_CHANGED, {
+        previousStage, newStage: this.growthStage
+      });
+    }
+  }
+
+  getComputedStats() {
+    const base = OriginStatsTable[this.growthStage];
+    const mod = GrowthStyleModifiers[this.growthStyle];
+    return {
+      maxHealth: Math.round(base.maxHealth * mod.healthMult),
+      attack: Math.round(base.attack * mod.attackMult),
+      defense: Math.round(base.defense * mod.defenseMult)
+    };
+  }
+
+  toJSON() {
+    return {
+      growthStage: this.growthStage,
+      growthStyle: this.growthStyle,
+      dna: this.dna.toJSON(),
+      waterCount: this.waterCount,
+      sunlightCount: this.sunlightCount,
+      affinity: this.affinity,
+      waterBias: this.waterBias,
+      sunlightBias: this.sunlightBias
+    };
+  }
+
+  static fromJSON(json) {
+    const state = new OriginRuntimeState();
+    state.growthStage = json.growthStage;
+    state.growthStyle = json.growthStyle;
+    state.dna = OriginDNA.fromJSON(json.dna);
+    state.waterCount = json.waterCount;
+    state.sunlightCount = json.sunlightCount;
+    state.affinity = json.affinity;
+    state.waterBias = json.waterBias;
+    state.sunlightBias = json.sunlightBias;
+    return state;
+  }
+
+  save() {
+    try {
+      localStorage.setItem(OriginRuntimeState.SAVE_KEY, JSON.stringify(this.toJSON()));
+      return true;
+    } catch (err) {
+      console.error("[OriginRuntimeState] 저장 실패:", err);
+      return false;
+    }
+  }
+
+  static load() {
+    try {
+      const raw = localStorage.getItem(OriginRuntimeState.SAVE_KEY);
+      if (!raw) return null;
+      return OriginRuntimeState.fromJSON(JSON.parse(raw));
+    } catch (err) {
+      console.error("[OriginRuntimeState] 로드 실패, 손상된 세이브로 판단:", err);
+      return null;
+    }
+  }
+}
+
+function runPart2Tests() {
+  const results = [];
+
+  const state = new OriginRuntimeState();
+  results.push(`초기 성장 단계 SEED: ${state.growthStage === GrowthStage.SEED ? "PASS" : "FAIL"}`);
+
+  state.water(2);
+  state.giveSunlight(1);
+  results.push(`물/햇빛 카운트 반영: ${state.waterCount === 2 && state.sunlightCount === 1 ? "PASS" : "FAIL"}`);
+
+  results.push(`성장 단계 이행(SPROUT): ${state.growthStage === GrowthStage.SPROUT ? "PASS" : "FAIL"}`);
+
+  const dna1 = new OriginDNA(12345);
+  const dna2 = new OriginDNA(12345);
+  results.push(`DNA 시드 재현성: ${dna1.dnaCode === dna2.dnaCode ? "PASS" : "FAIL"}`);
+
+  const stats = state.getComputedStats();
+  results.push(`전투 스탯 계산 (attack=${stats.attack}, defense=${stats.defense}, hp=${stats.maxHealth})`);
+
+  const saved = state.save();
+  const loaded = OriginRuntimeState.load();
+  results.push(`저장/로드 왕복: ${saved && loaded && loaded.dna.dnaCode === state.dna.dnaCode ? "PASS" : "FAIL"}`);
+
+  return results;
+}
+
+/* ============================================================
+   CRETYZ Core - Part 3 / 1000 (전투 시스템 기초)
+   ============================================================ */
+
+const CombatEvents = Object.freeze({
+  DAMAGE_TAKEN: "OnDamageTaken",
+  HEALED: "OnHealed",
+  UNIT_DIED: "OnUnitDied",
+  STATUS_APPLIED: "OnStatusApplied",
+  STATUS_EXPIRED: "OnStatusExpired",
+  ULTIMATE_READY: "OnUltimateReady",
+  SKILL_USED: "OnSkillUsed"
+});
+
+class StatusEffectInstance {
+  constructor(type, durationTurns, magnitude = 1) {
+    this.type = type;
+    this.remainingTurns = durationTurns;
+    this.magnitude = magnitude;
+  }
+
+  tick() {
+    this.remainingTurns -= 1;
+    return this.remainingTurns <= 0;
+  }
+}
+
+class StatusEffectManager {
+  constructor(ownerUnit) {
+    this.owner = ownerUnit;
+    this.activeEffects = new Map();
+  }
+
+  apply(type, durationTurns, magnitude = 1) {
+    const instance = new StatusEffectInstance(type, durationTurns, magnitude);
+    this.activeEffects.set(type, instance);
+    GameEventBus.publish(CombatEvents.STATUS_APPLIED, {
+      unit: this.owner, type, durationTurns, magnitude
+    });
+  }
+
+  remove(type) {
+    this.activeEffects.delete(type);
+  }
+
+  has(type) {
+    return this.activeEffects.has(type);
+  }
+
+  tickAll() {
+    const expired = [];
+
+    for (const [type, instance] of this.activeEffects) {
+      if (type === StatusEffectType.BURN) {
+        this.owner.takeDamage(instance.magnitude, StatusEffectType.NONE);
+      }
+      if (type === StatusEffectType.REGENERATION) {
+        this.owner.heal(instance.magnitude);
+      }
+
+      const isExpired = instance.tick();
+      if (isExpired) expired.push(type);
+    }
+
+    for (const type of expired) {
+      this.activeEffects.delete(type);
+      GameEventBus.publish(CombatEvents.STATUS_EXPIRED, { unit: this.owner, type });
+    }
+  }
+
+  getAttackMultiplier() {
+    let mult = 1.0;
+    if (this.has(StatusEffectType.ATTACK_BOOST)) {
+      mult *= (1 + this.activeEffects.get(StatusEffectType.ATTACK_BOOST).magnitude);
+    }
+    return mult;
+  }
+
+  getDefenseMultiplier() {
+    let mult = 1.0;
+    if (this.has(StatusEffectType.DEFENSE_BOOST)) {
+      mult *= (1 + this.activeEffects.get(StatusEffectType.DEFENSE_BOOST).magnitude);
+    }
+    return mult;
+  }
+
+  isStunned() {
+    return this.has(StatusEffectType.STUN);
+  }
+
+  isFrozen() {
+    return this.has(StatusEffectType.FREEZE);
+  }
+}
+
+class UltimateGauge {
+  static MAX_VALUE = 100;
+
+  constructor() {
+    this.value = 0;
+    this.isReady = false;
+  }
+
+  addFromDamageDealt(damageAmount) {
+    this.#add(damageAmount * 0.5);
+  }
+
+  addFromDamageTaken(damageAmount) {
+    this.#add(damageAmount * 0.3);
+  }
+
+  addFromSupportAction(fixedAmount) {
+    this.#add(fixedAmount);
+  }
+
+  #add(amount) {
+    if (this.isReady) return;
+    this.value = Math.min(UltimateGauge.MAX_VALUE, this.value + amount);
+    if (this.value >= UltimateGauge.MAX_VALUE) {
+      this.isReady = true;
+      GameEventBus.publish(CombatEvents.ULTIMATE_READY, {});
+    }
+  }
+
+  consume() {
+    if (!this.isReady) {
+      console.warn("[UltimateGauge] 아직 게이지가 다 차지 않았는데 사용 시도됨");
+      return false;
+    }
+    this.value = 0;
+    this.isReady = false;
+    return true;
+  }
+}
+
+class SkillDefinition {
+  constructor({ id, name, cooldownTurns, isUltimate = false, effectFn }) {
+    this.id = id;
+    this.name = name;
+    this.cooldownTurns = cooldownTurns;
+    this.isUltimate = isUltimate;
+    this.effectFn = effectFn;
+  }
+}
+
+class CombatUnit {
+  constructor(name, baseStats) {
+    this.name = name;
+    this.maxHealth = baseStats.maxHealth;
+    this.currentHealth = baseStats.maxHealth;
+    this.baseAttack = baseStats.attack;
+    this.baseDefense = baseStats.defense;
+
+    this.statusEffects = new StatusEffectManager(this);
+    this.ultimateGauge = new UltimateGauge();
+
+    this.skillCooldowns = new Map();
+  }
+
+  get isDead() {
+    return this.currentHealth <= 0;
+  }
+
+  get effectiveAttack() {
+    return Math.round(this.baseAttack * this.statusEffects.getAttackMultiplier());
+  }
+
+  get effectiveDefense() {
+    return Math.round(this.baseDefense * this.statusEffects.getDefenseMultiplier());
+  }
+
+  takeDamage(rawAmount, inflictedEffect = StatusEffectType.NONE, effectDuration = 2, effectMagnitude = 1) {
+    const mitigated = Math.max(1, Math.round(rawAmount - this.effectiveDefense * 0.5));
+    this.currentHealth = Math.max(0, this.currentHealth - mitigated);
+
+    this.ultimateGauge.addFromDamageTaken(mitigated);
+
+    GameEventBus.publish(CombatEvents.DAMAGE_TAKEN, {
+      unit: this, amount: mitigated, remainingHealth: this.currentHealth
+    });
+
+    if (inflictedEffect !== StatusEffectType.NONE) {
+      this.statusEffects.apply(inflictedEffect, effectDuration, effectMagnitude);
+    }
+
+    if (this.isDead) {
+      GameEventBus.publish(CombatEvents.UNIT_DIED, { unit: this });
+    }
+
+    return mitigated;
+  }
+
+  heal(amount) {
+    const before = this.currentHealth;
+    this.currentHealth = Math.min(this.maxHealth, this.currentHealth + amount);
+    const actualHealed = this.currentHealth - before;
+    if (actualHealed > 0) {
+      GameEventBus.publish(CombatEvents.HEALED, { unit: this, amount: actualHealed });
+    }
+    return actualHealed;
+  }
+
+  basicAttack(target) {
+    const damage = this.effectiveAttack;
+    const dealt = target.takeDamage(damage);
+    this.ultimateGauge.addFromDamageDealt(dealt);
+    return dealt;
+  }
+
+  canUseSkill(skillId) {
+    if (this.statusEffects.isStunned()) return false;
+    const remaining = this.skillCooldowns.get(skillId) ?? 0;
+    return remaining <= 0;
+  }
+
+  useSkill(skill, target) {
+    if (!this.canUseSkill(skill.id)) {
+      console.warn(`[CombatUnit] ${this.name}이(가) ${skill.name} 사용 불가 (쿨다운 또는 기절 상태)`);
+      return false;
+    }
+
+    if (skill.isUltimate) {
+      const consumed = this.ultimateGauge.consume();
+      if (!consumed) return false;
+    }
+
+    skill.effectFn(this, target);
+    this.skillCooldowns.set(skill.id, skill.cooldownTurns);
+
+    GameEventBus.publish(CombatEvents.SKILL_USED, {
+      caster: this, skillId: skill.id, target
+    });
+
+    return true;
+  }
+
+  endTurn() {
+    this.statusEffects.tickAll();
+    for (const [skillId, remaining] of this.skillCooldowns) {
+      if (remaining > 0) this.skillCooldowns.set(skillId, remaining - 1);
+    }
+  }
+}
+
+function runPart3Tests() {
+  const results = [];
+
+  const attacker = new CombatUnit("Origin", { maxHealth: 100, attack: 20, defense: 5 });
+  const enemy = new CombatUnit("Blightleaf", { maxHealth: 60, attack: 10, defense: 8 });
+
+  const dealt = attacker.basicAttack(enemy);
+  results.push(`기본 공격 데미지 적용: ${enemy.currentHealth === 60 - dealt ? "PASS" : "FAIL"} (dealt=${dealt})`);
+
+  enemy.statusEffects.apply(StatusEffectType.BURN, 3, 5);
+  results.push(`화상 상태이상 부여: ${enemy.statusEffects.has(StatusEffectType.BURN) ? "PASS" : "FAIL"}`);
+
+  const beforeBurnTick = enemy.currentHealth;
+  enemy.endTurn();
+  results.push(`화상 틱 데미지: ${enemy.currentHealth === beforeBurnTick - 5 ? "PASS" : "FAIL"}`);
+
+  const gaugeUnit = new CombatUnit("TestUnit", { maxHealth: 100, attack: 50, defense: 0 });
+  const dummy = new CombatUnit("Dummy", { maxHealth: 500, attack: 0, defense: 0 });
+  for (let i = 0; i < 10; i++) gaugeUnit.basicAttack(dummy);
+  results.push(`궁극기 게이지 충전: ${gaugeUnit.ultimateGauge.isReady ? "PASS" : "FAIL"} (value=${gaugeUnit.ultimateGauge.value})`);
+
+  const fireballSkill = new SkillDefinition({
+    id: "fireball",
+    name: "파이어볼",
+    cooldownTurns: 2,
+    effectFn: (caster, target) => { target.takeDamage(15, StatusEffectType.BURN, 2, 3); }
+  });
+
+  const caster = new CombatUnit("Caster", { maxHealth: 100, attack: 10, defense: 0 });
+  const target = new CombatUnit("Target", { maxHealth: 100, attack: 10, defense: 0 });
+  const usedFirst = caster.useSkill(fireballSkill, target);
+  const usedSecondImmediately = caster.useSkill(fireballSkill, target);
+  results.push(`스킬 사용 성공: ${usedFirst ? "PASS" : "FAIL"}`);
+  results.push(`쿨다운 중 재사용 차단: ${!usedSecondImmediately ? "PASS" : "FAIL"}`);
+
+  const stunnedUnit = new CombatUnit("Stunned", { maxHealth: 100, attack: 10, defense: 0 });
+  stunnedUnit.statusEffects.apply(StatusEffectType.STUN, 1, 1);
+  results.push(`기절 중 스킬 차단: ${!stunnedUnit.canUseSkill(fireballSkill.id) ? "PASS" : "FAIL"}`);
+
+  return results;
+}
+
+/* ============================================================
+   CRETYZ Core - Part 4 / 1000 (세계수 회복 & 지역 언락 시스템)
+   ============================================================ */
+
+const WorldEvents = Object.freeze({
+  PURIFICATION_CHANGED: "OnPurificationChanged",
+  WORLD_TREE_LEVEL_UP: "OnWorldTreeLevelUp",
+  REGION_UNLOCKED: "OnRegionUnlocked",
+  BLIGHT_CORE_OBTAINED: "OnBlightCoreObtained"
+});
+
+const WorldTreeLevel = Object.freeze({
+  WITHERED: 1,
+  FIRST_SPROUT: 2,
+  GROWING_LEAVES: 3,
+  BLOOMING: 4,
+  RESTORED: 5
+});
+
+const WorldTreeLevelNames = {
+  [WorldTreeLevel.WITHERED]: "Withered World Tree",
+  [WorldTreeLevel.FIRST_SPROUT]: "First Sprout",
+  [WorldTreeLevel.GROWING_LEAVES]: "Growing Leaves",
+  [WorldTreeLevel.BLOOMING]: "Blooming World Tree",
+  [WorldTreeLevel.RESTORED]: "Restored World Tree"
+};
+
+const WorldTreeLevelThresholds = [50, 150, 300, 500];
+
+const RegionUnlockRequirement = {
+  [RegionType.RESEARCH_LAB]: 1,
+  [RegionType.FORGOTTEN_GRASSLANDS]: 1,
+  [RegionType.MUSHROOM_FOREST]: 1,
+  [RegionType.SCORCHED_DESERT]: 2,
+  [RegionType.FROZEN_VALLEY]: 2,
+  [RegionType.BURNING_VOLCANO]: 3,
+  [RegionType.LOST_FLOWER_CITY]: 3,
+  [RegionType.SKY_ISLANDS]: 4,
+  [RegionType.INSIDE_WORLD_TREE]: 5,
+  [RegionType.ROOTS_OF_WORLD_TREE]: 5
+};
+
+class WorldTreeState {
+  static SAVE_KEY = "cretyz_worldtree_save";
+
+  constructor() {
+    this.level = WorldTreeLevel.WITHERED;
+    this.purificationPoints = 0;
+    this.totalBlightCoresObtained = 0;
+    this.unlockedRegions = new Set([RegionType.RESEARCH_LAB, RegionType.FORGOTTEN_GRASSLANDS]);
+  }
+
+  obtainBlightCore() {
+    this.totalBlightCoresObtained += 1;
+    GameEventBus.publish(WorldEvents.BLIGHT_CORE_OBTAINED, {
+      total: this.totalBlightCoresObtained
+    });
+  }
+
+  purifyCore(pointValue = 10) {
+    this.purificationPoints += pointValue;
+    GameEventBus.publish(WorldEvents.PURIFICATION_CHANGED, {
+      totalPoints: this.purificationPoints
+    });
+    this.#tryLevelUp();
+  }
+
+  researchCore() {
+    return { researched: true };
+  }
+
+  #tryLevelUp() {
+    while (this.level < WorldTreeLevel.RESTORED) {
+      const requiredForNext = WorldTreeLevelThresholds[this.level - 1];
+      if (requiredForNext === undefined) break;
+
+      if (this.purificationPoints >= requiredForNext) {
+        this.level += 1;
+        GameEventBus.publish(WorldEvents.WORLD_TREE_LEVEL_UP, {
+          newLevel: this.level, levelName: WorldTreeLevelNames[this.level]
+        });
+        this.#unlockRegionsForLevel(this.level);
+      } else {
+        break;
+      }
+    }
+  }
+
+  #unlockRegionsForLevel(level) {
+    for (const regionKey in RegionUnlockRequirement) {
+      const region = Number(regionKey);
+      const requiredLevel = RegionUnlockRequirement[region];
+
+      if (requiredLevel <= level && !this.unlockedRegions.has(region)) {
+        this.unlockedRegions.add(region);
+        GameEventBus.publish(WorldEvents.REGION_UNLOCKED, { region });
+      }
+    }
+  }
+
+  isRegionUnlocked(region) {
+    return this.unlockedRegions.has(region);
+  }
+
+  toJSON() {
+    return {
+      level: this.level,
+      purificationPoints: this.purificationPoints,
+      totalBlightCoresObtained: this.totalBlightCoresObtained,
+      unlockedRegions: Array.from(this.unlockedRegions)
+    };
+  }
+
+  static fromJSON(json) {
+    const state = new WorldTreeState();
+    state.level = json.level;
+    state.purificationPoints = json.purificationPoints;
+    state.totalBlightCoresObtained = json.totalBlightCoresObtained;
+    state.unlockedRegions = new Set(json.unlockedRegions);
+    return state;
+  }
+
+  save() {
+    try {
+      localStorage.setItem(WorldTreeState.SAVE_KEY, JSON.stringify(this.toJSON()));
+      return true;
+    } catch (err) {
+      console.error("[WorldTreeState] 저장 실패:", err);
+      return false;
+    }
+  }
+
+  static load() {
+    try {
+      const raw = localStorage.getItem(WorldTreeState.SAVE_KEY);
+      if (!raw) return null;
+      return WorldTreeState.fromJSON(JSON.parse(raw));
+    } catch (err) {
+      console.error("[WorldTreeState] 로드 실패, 손상된 세이브로 판단:", err);
+      return null;
+    }
+  }
+}
+
+function runPart4Tests() {
+  const results = [];
+
+  const worldTree = new WorldTreeState();
+  results.push(`초기 레벨 WITHERED: ${worldTree.level === WorldTreeLevel.WITHERED ? "PASS" : "FAIL"}`);
+  results.push(`시작 지역 2곳 언락: ${worldTree.unlockedRegions.size === 2 ? "PASS" : "FAIL"}`);
+
+  worldTree.obtainBlightCore();
+  results.push(`오염핵 획득 카운트: ${worldTree.totalBlightCoresObtained === 1 ? "PASS" : "FAIL"}`);
+
+  worldTree.purifyCore(50);
+  results.push(`정화 포인트 반영 및 레벨업: ${worldTree.level === WorldTreeLevel.FIRST_SPROUT ? "PASS" : "FAIL"} (level=${worldTree.level})`);
+
+  results.push(`사막 지역 아직 잠김(레벨2 미만 요구): ${!worldTree.isRegionUnlocked(RegionType.SCORCHED_DESERT) ? "PASS" : "FAIL"}`);
+
+  worldTree.purifyCore(100);
+  results.push(`연속 레벨업(3단계 도달): ${worldTree.level === WorldTreeLevel.GROWING_LEAVES ? "PASS" : "FAIL"} (level=${worldTree.level})`);
+  results.push(`사막 지역 언락됨(레벨2 조건 충족): ${worldTree.isRegionUnlocked(RegionType.SCORCHED_DESERT) ? "PASS" : "FAIL"}`);
+
+  const saved = worldTree.save();
+  const loaded = WorldTreeState.load();
+  results.push(`저장/로드 왕복: ${saved && loaded && loaded.level === worldTree.level ? "PASS" : "FAIL"}`);
+
+  return results;
+}
+
+/* ============================================================
+   CRETYZ UI Controller - Part 5 / 1000 (실제 플레이 UI)
+   ============================================================ */
+
+let playerOrigin = OriginRuntimeState.load() || new OriginRuntimeState();
+let worldTree = WorldTreeState.load() || new WorldTreeState();
+
+const RegionDisplayNames = {
+  [RegionType.RESEARCH_LAB]: "연구소",
+  [RegionType.FORGOTTEN_GRASSLANDS]: "초원",
+  [RegionType.MUSHROOM_FOREST]: "버섯숲",
+  [RegionType.SCORCHED_DESERT]: "사막",
+  [RegionType.FROZEN_VALLEY]: "설원",
+  [RegionType.BURNING_VOLCANO]: "화산",
+  [RegionType.LOST_FLOWER_CITY]: "꽃의 도시",
+  [RegionType.SKY_ISLANDS]: "하늘섬",
+  [RegionType.INSIDE_WORLD_TREE]: "세계수 내부",
+  [RegionType.ROOTS_OF_WORLD_TREE]: "세계수 뿌리"
+};
+
+const GrowthStageNames = {
+  [GrowthStage.SEED]: "씨앗",
+  [GrowthStage.SPROUT]: "새싹",
+  [GrowthStage.YOUNG_PLANT]: "유년기",
+  [GrowthStage.GROWING_PLANT]: "성장기",
+  [GrowthStage.BLOOMING_PLANT]: "개화",
+  [GrowthStage.MATURE_PLANT]: "성숙",
+  [GrowthStage.AWAKENED_ORIGIN]: "각성",
+  [GrowthStage.HEIR_OF_WORLD_TREE]: "세계수의 후계자"
+};
+
+const GrowthStageEmoji = {
+  [GrowthStage.SEED]: "🌰",
+  [GrowthStage.SPROUT]: "🌱",
+  [GrowthStage.YOUNG_PLANT]: "🌿",
+  [GrowthStage.GROWING_PLANT]: "☘️",
+  [GrowthStage.BLOOMING_PLANT]: "🌸",
+  [GrowthStage.MATURE_PLANT]: "🌳",
+  [GrowthStage.AWAKENED_ORIGIN]: "✨🌳",
+  [GrowthStage.HEIR_OF_WORLD_TREE]: "🌳🌟"
+};
+
+function refreshOriginUI() {
+  const stats = playerOrigin.getComputedStats();
+
+  document.getElementById("origin-visual").textContent = GrowthStageEmoji[playerOrigin.growthStage];
+  document.getElementById("origin-name").textContent = `DNA ${playerOrigin.dna.dnaCode}`;
+  document.getElementById("origin-stage").textContent =
+    `단계: ${GrowthStageNames[playerOrigin.growthStage]} / 스타일: ${playerOrigin.growthStyle}`;
+
+  document.getElementById("stat-attack").textContent = stats.attack;
+  document.getElementById("stat-defense").textContent = stats.defense;
+  document.getElementById("stat-hp").textContent = stats.maxHealth;
+
+  document.getElementById("affinity-bar-fill").style.width = `${playerOrigin.affinity}%`;
+}
+
+function refreshWorldTreeUI() {
+  document.getElementById("worldtree-level").textContent =
+    `세계수 레벨: ${WorldTreeLevelNames[worldTree.level]}`;
+  document.getElementById("worldtree-points").textContent =
+    `정화 포인트: ${worldTree.purificationPoints}`;
+
+  const listEl = document.getElementById("region-list");
+  listEl.innerHTML = "";
+  for (const regionKey in RegionDisplayNames) {
+    const region = Number(regionKey);
+    const chip = document.createElement("div");
+    chip.className = "region-chip" + (worldTree.isRegionUnlocked(region) ? " unlocked" : "");
+    chip.textContent = RegionDisplayNames[region];
+    listEl.appendChild(chip);
+  }
+}
+
+function refreshAllUI() {
+  refreshOriginUI();
+  refreshWorldTreeUI();
+}
+
+document.getElementById("btn-water").addEventListener("click", () => {
+  playerOrigin.water(1);
+  playerOrigin.increaseAffinity(1);
+  playerOrigin.save();
+  refreshOriginUI();
+});
+
+document.getElementById("btn-sunlight").addEventListener("click", () => {
+  playerOrigin.giveSunlight(1);
+  playerOrigin.increaseAffinity(1);
+  playerOrigin.save();
+  refreshOriginUI();
+});
+
+GameEventBus.subscribe(OriginEvents.GROWTH_STAGE_CHANGED, () => refreshOriginUI());
+GameEventBus.subscribe(WorldEvents.WORLD_TREE_LEVEL_UP, () => refreshWorldTreeUI());
+GameEventBus.subscribe(WorldEvents.REGION_UNLOCKED, () => refreshWorldTreeUI());
+
+window.onload = () => {
+  refreshAllUI();
+
+  const part1Results = runBootTests();
+  const part2Results = runPart2Tests();
+  const part3Results = runPart3Tests();
+  const part4Results = runPart4Tests();
+  document.getElementById("log").textContent =
+    "=== Part 1 ===\n" + part1Results.join("\n") +
+    "\n\n=== Part 2 ===\n" + part2Results.join("\n") +
+    "\n\n=== Part 3 ===\n" + part3Results.join("\n") +
+    "\n\n=== Part 4 ===\n" + part4Results.join("\n");
+};
+</script>
+</body>
+</html>
+
