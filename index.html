@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>CRETYZ: The Last Seed</title>
+<style>
+  body { background:#0e1a12; color:#eafbe7; font-family: sans-serif; margin:0; padding:20px; }
+  #log { white-space: pre-wrap; background:#132018; padding:12px; border-radius:8px; font-size:13px; }
+</style>
+</head>
+<body>
+<h1>🌱 CRETYZ: The Last Seed</h1>
+<div id="log">게임 로딩 중...</div>
+
+<script>
+/* ============================================================
+   CRETYZ Core - Part 1 / 1000 (Web/JS 버전)
+   ============================================================ */
+
+// ---------- Enums ----------
+const GrowthStage = Object.freeze({
+  SEED: 0, SPROUT: 1, YOUNG_PLANT: 2, GROWING_PLANT: 3,
+  BLOOMING_PLANT: 4, MATURE_PLANT: 5, AWAKENED_ORIGIN: 6, HEIR_OF_WORLD_TREE: 7
+});
+
+const GrowthStyle = Object.freeze({
+  OFFENSIVE: "OFFENSIVE", DEFENSIVE: "DEFENSIVE", SUPPORT: "SUPPORT", BALANCED: "BALANCED"
+});
+
+// 순서 = 스토리 진행 순서. 새 지역은 반드시 끝에 추가 (세이브 데이터 호환성 때문)
+const RegionType = Object.freeze({
+  RESEARCH_LAB: 0, FORGOTTEN_GRASSLANDS: 1, MUSHROOM_FOREST: 2, SCORCHED_DESERT: 3,
+  FROZEN_VALLEY: 4, BURNING_VOLCANO: 5, LOST_FLOWER_CITY: 6, SKY_ISLANDS: 7,
+  INSIDE_WORLD_TREE: 8, ROOTS_OF_WORLD_TREE: 9
+});
+
+const DifficultyLevel = Object.freeze({
+  EASY: "EASY", NORMAL: "NORMAL", HARD: "HARD", NIGHTMARE: "NIGHTMARE",
+  BLIGHT: "BLIGHT", WORLD_TREE: "WORLD_TREE"
+});
+
+// 비트플래그: 상태이상 중첩 가능 (화상+빙결 저항 등 동시에 여러 개)
+const StatusEffectType = Object.freeze({
+  NONE: 0, BURN: 1 << 0, FREEZE: 1 << 1, POISON: 1 << 2, SLOW: 1 << 3,
+  STUN: 1 << 4, REGENERATION: 1 << 5, DEFENSE_BOOST: 1 << 6, ATTACK_BOOST: 1 << 7
+});
+
+// ---------- Event Bus ----------
+// Unity의 GameEventBus를 JS로 이식. 구독/발행 방식은 동일하게 유지해서
+// 나중에 Unity로 이식하고 싶어지더라도 개념이 그대로 옮겨가도록 설계.
+class GameEventBus {
+  static #subscribers = new Map();
+
+  static subscribe(eventName, handler) {
+    if (!this.#subscribers.has(eventName)) {
+      this.#subscribers.set(eventName, []);
+    }
+    this.#subscribers.get(eventName).push(handler);
+  }
+
+  static unsubscribe(eventName, handler) {
+    if (!this.#subscribers.has(eventName)) return;
+    const list = this.#subscribers.get(eventName);
+    const idx = list.indexOf(handler);
+    if (idx !== -1) list.splice(idx, 1);
+    if (list.length === 0) this.#subscribers.delete(eventName);
+  }
+
+  static publish(eventName, payload) {
+    if (!this.#subscribers.has(eventName)) return; // 구독자 없음 - 정상 상황
+    const snapshot = [...this.#subscribers.get(eventName)]; // 콜백 중 구독 변경 방어
+    for (const handler of snapshot) {
+      try {
+        handler(payload);
+      } catch (err) {
+        console.error(`[GameEventBus] ${eventName} 처리 중 예외:`, err);
+      }
+    }
+  }
+
+  static clearAll() {
+    this.#subscribers.clear();
+  }
+}
+
+// ---------- GameManager ----------
+// Unity의 싱글톤 MonoBehaviour 역할을 JS 전역 객체로 대체.
+// (브라우저 환경에는 씬 개념이 없으므로 DontDestroyOnLoad 로직은 불필요)
+class GameManager {
+  static #instance = null;
+
+  #currentDifficulty = DifficultyLevel.NORMAL;
+
+  static get instance() {
+    if (!this.#instance) this.#instance = new GameManager();
+    return this.#instance;
+  }
+
+  get currentDifficulty() { return this.#currentDifficulty; }
+
+  setDifficulty(level) {
+    this.#currentDifficulty = level;
+    GameEventBus.publish("OnDifficultyChanged", { level });
+  }
+}
+
+// ---------- FSM (State Machine) ----------
+class StateMachine {
+  #currentState = null;
+
+  get currentState() { return this.#currentState; }
+
+  changeState(newState) {
+    if (!newState) {
+      console.warn("[StateMachine] null 상태로 전환 시도 - 무시함");
+      return;
+    }
+    if (this.#currentState && this.#currentState.onExit) this.#currentState.onExit();
+    this.#currentState = newState;
+    if (this.#currentState.onEnter) this.#currentState.onEnter();
+  }
+
+  tick(deltaTime) {
+    if (this.#currentState && this.#currentState.onUpdate) {
+      this.#currentState.onUpdate(deltaTime);
+    }
+  }
+}
+
+// ---------- 부팅 확인용 테스트 ----------
+function runBootTests() {
+  const results = [];
+
+  // 이벤트 버스 테스트
+  let received = null;
+  const handler = (e) => { received = e.value; };
+  GameEventBus.subscribe("TestEvent", handler);
+  GameEventBus.publish("TestEvent", { value: 42 });
+  results.push(`이벤트 버스 발행/구독: ${received === 42 ? "PASS" : "FAIL"}`);
+  GameEventBus.unsubscribe("TestEvent", handler);
+
+  // 구독 해제 테스트
+  let callCount = 0;
+  const handler2 = () => { callCount++; };
+  GameEventBus.subscribe("TestEvent2", handler2);
+  GameEventBus.unsubscribe("TestEvent2", handler2);
+  GameEventBus.publish("TestEvent2", {});
+  results.push(`이벤트 버스 구독 해제: ${callCount === 0 ? "PASS" : "FAIL"}`);
+
+  // GameManager 싱글톤 테스트
+  const gm1 = GameManager.instance;
+  const gm2 = GameManager.instance;
+  results.push(`GameManager 싱글톤: ${gm1 === gm2 ? "PASS" : "FAIL"}`);
+
+  gm1.setDifficulty(DifficultyLevel.HARD);
+  results.push(`난이도 설정: ${gm1.currentDifficulty === DifficultyLevel.HARD ? "PASS" : "FAIL"}`);
+
+  return results;
+}
+
+// ---------- 실행 ----------
+window.onload = () => {
+  const results = runBootTests();
+  document.getElementById("log").textContent =
+    "CRETYZ Part 1 / 1000 - Core 시스템 부팅 완료\n\n" + results.join("\n");
+};
+</script>
+</body>
+</html>
