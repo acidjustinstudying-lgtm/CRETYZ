@@ -375,6 +375,204 @@ class IncubationState {
     refreshIncubationUI();
   });
 })();
+  /* ============================================================
+   CRETYZ v2 - Part 2 / ??? (오리진 데이터 + 대화 시스템 + 첫 만남)
+   ============================================================ */
+
+// ---------- OriginRuntimeState ----------
+// 인큐베이션이 끝난 뒤의 실제 오리진 상태. growthStyle은 인큐베이션 결과로 딱 한 번 고정되고
+// 이후 바뀌지 않는다 (구버전처럼 실시간 재계산 안 함).
+const OriginBaseStatsByStyle = {
+  [GrowthStyle.OFFENSIVE]: { maxHealth: 30, attack: 8, defense: 2 },
+  [GrowthStyle.DEFENSIVE]: { maxHealth: 45, attack: 4, defense: 6 },
+  [GrowthStyle.BALANCED]:  { maxHealth: 36, attack: 6, defense: 4 }
+};
+
+class OriginRuntimeState {
+  static SAVE_KEY = "cretyz_v2_origin";
+
+  constructor(growthStyle) {
+    this.growthStyle = growthStyle;
+    const base = OriginBaseStatsByStyle[growthStyle];
+    this.maxHealth = base.maxHealth;
+    this.currentHealth = base.maxHealth;
+    this.attack = base.attack;
+    this.defense = base.defense;
+    this.name = "잡초"; // 최종 엔딩 전까지 이 이름 고정. "Cretyz"로 바뀌는 건 엔딩 이벤트에서 처리
+  }
+
+  toJSON() {
+    return {
+      growthStyle: this.growthStyle,
+      maxHealth: this.maxHealth,
+      currentHealth: this.currentHealth,
+      attack: this.attack,
+      defense: this.defense,
+      name: this.name
+    };
+  }
+
+  static fromJSON(json) {
+    const state = new OriginRuntimeState(json.growthStyle);
+    state.currentHealth = json.currentHealth;
+    state.name = json.name;
+    return state;
+  }
+
+  save() {
+    try {
+      localStorage.setItem(OriginRuntimeState.SAVE_KEY, JSON.stringify(this.toJSON()));
+      return true;
+    } catch (err) {
+      console.error("[OriginRuntimeState] 저장 실패:", err);
+      return false;
+    }
+  }
+
+  static load() {
+    try {
+      const raw = localStorage.getItem(OriginRuntimeState.SAVE_KEY);
+      if (!raw) return null;
+      return OriginRuntimeState.fromJSON(JSON.parse(raw));
+    } catch (err) {
+      console.error("[OriginRuntimeState] 로드 실패:", err);
+      return null;
+    }
+  }
+}
+
+// ---------- 캐릭터 정의 ----------
+const StoryCharacters = Object.freeze({
+  JUSTIN: { name: "저스틴 박사", portrait: "🧑‍🔬" },
+  EDEN:   { name: "에덴", portrait: "🕴️" },
+  NARRATOR: { name: "", portrait: "" }
+});
+
+// ---------- 대화 시퀀스 ----------
+const StoryScenes = {
+  MEETING_JUSTIN: [
+    { speaker: StoryCharacters.NARRATOR, text: "작은 잡초를 품에 안고, 주인공은 연구소로 향한다." },
+    { speaker: StoryCharacters.JUSTIN, text: "오, 드디어 나왔구나. 어디 좀 보자..." },
+    { speaker: StoryCharacters.JUSTIN, text: "생각보다 훨씬... 평범하게 생겼군. 실망했나?" },
+    { speaker: StoryCharacters.JUSTIN, text: "하지만 걱정 말게. 이 아이가 어떻게 자랄지는, 이제부터 자네에게 달렸으니까." }
+  ],
+  EDEN_ATTACK: [
+    { speaker: StoryCharacters.NARRATOR, text: "그 순간, 연구소 전체에 경보가 울린다." },
+    { speaker: StoryCharacters.JUSTIN, text: "이 기척은... 설마!" },
+    { speaker: StoryCharacters.NARRATOR, text: "벽을 뚫고, 오염식물들과 함께 한 남자가 걸어 들어온다." },
+    { speaker: StoryCharacters.EDEN, text: "저스틴. 오랜만이군." },
+    { speaker: StoryCharacters.JUSTIN, text: "에덴...! 자네가 왜 여기에!" },
+    { speaker: StoryCharacters.EDEN, text: "그 잡초, 넘겨받아야겠다." },
+    { speaker: StoryCharacters.NARRATOR, text: "오염식물들이 일제히 다가온다. 도망칠 곳은 없다." }
+  ]
+};
+
+// ---------- DialogueBox (자가생성 UI) ----------
+(function initDialogueSystem() {
+  const style = document.createElement("style");
+  style.textContent = `
+    #dialogue-overlay {
+      display:none; position:fixed; left:0; right:0; bottom:0;
+      background:rgba(10,20,12,0.97); padding:18px 20px; border-top:2px solid #3C6E32;
+      z-index:1000;
+    }
+    #dialogue-speaker { font-weight:bold; color:#B6F09C; margin-bottom:6px; font-size:15px; }
+    #dialogue-portrait { font-size:32px; float:left; margin-right:12px; }
+    #dialogue-text { font-size:15px; line-height:1.5; min-height:44px; }
+    #dialogue-next-btn {
+      margin-top:12px; background:#3C6E32; color:#eafbe7; border:none;
+      padding:8px 18px; border-radius:8px; cursor:pointer; float:right; font-size:14px;
+    }
+    #dialogue-clear { clear:both; }
+  `;
+  document.head.appendChild(style);
+
+  const overlay = document.createElement("div");
+  overlay.id = "dialogue-overlay";
+  overlay.innerHTML = `
+    <div id="dialogue-portrait"></div>
+    <div id="dialogue-speaker"></div>
+    <div id="dialogue-text"></div>
+    <div id="dialogue-clear"></div>
+    <button id="dialogue-next-btn">다음 ▶</button>
+  `;
+  document.body.appendChild(overlay);
+
+  let activeScene = null;
+  let activeLineIndex = 0;
+  let onSceneEndCallback = null;
+
+  // onEnd: 대화가 끝난 뒤 호출할 콜백 (예: 전투 시작 트리거)
+  window.playDialogue = function playDialogue(sceneId, onEnd) {
+    const scene = StoryScenes[sceneId];
+    if (!scene) {
+      console.warn(`[Dialogue] 존재하지 않는 장면: ${sceneId}`);
+      return;
+    }
+    activeScene = scene;
+    activeLineIndex = 0;
+    onSceneEndCallback = onEnd || null;
+    overlay.style.display = "block";
+    renderCurrentLine();
+  };
+
+  function renderCurrentLine() {
+    const line = activeScene[activeLineIndex];
+    document.getElementById("dialogue-portrait").textContent = line.speaker.portrait;
+    document.getElementById("dialogue-speaker").textContent = line.speaker.name;
+    document.getElementById("dialogue-text").textContent = line.text;
+  }
+
+  document.getElementById("dialogue-next-btn").addEventListener("click", () => {
+    activeLineIndex += 1;
+    if (activeLineIndex >= activeScene.length) {
+      overlay.style.display = "none";
+      const cb = onSceneEndCallback;
+      activeScene = null;
+      onSceneEndCallback = null;
+      if (cb) cb();
+      return;
+    }
+    renderCurrentLine();
+  });
+})();
+
+// ---------- 탄생 이후 흐름 연결 ----------
+let playerOrigin = OriginRuntimeState.load() || null;
+let storyFlags = StoryFlags.load() || new StoryFlags();
+
+GameEventBus.subscribe(CoreEvents.ORIGIN_BORN, (e) => {
+  playerOrigin = new OriginRuntimeState(e.style);
+  playerOrigin.save();
+
+  if (!storyFlags.has("seen_meeting_justin")) {
+    playDialogue("MEETING_JUSTIN", () => {
+      storyFlags.set("seen_meeting_justin");
+      triggerEdenAttack();
+    });
+  }
+});
+
+function triggerEdenAttack() {
+  if (storyFlags.has("seen_eden_attack")) return;
+  playDialogue("EDEN_ATTACK", () => {
+    storyFlags.set("seen_eden_attack");
+    console.log("[Story] 여기서 첫 전투(브롤스타즈식 직접조작)가 시작됨 - 다음 파트에서 구현");
+    // 다음 파트: startFirstBattle(); 형태로 연결 예정
+  });
+}
+
+// 이미 탄생한 상태로 게임을 다시 열었을 경우, 아직 못 본 컷씬을 이어서 보여줌
+window.addEventListener("load", () => {
+  if (playerOrigin && !storyFlags.has("seen_meeting_justin")) {
+    playDialogue("MEETING_JUSTIN", () => {
+      storyFlags.set("seen_meeting_justin");
+      triggerEdenAttack();
+    });
+  } else if (playerOrigin && storyFlags.has("seen_meeting_justin") && !storyFlags.has("seen_eden_attack")) {
+    triggerEdenAttack();
+  }
+});
 </script>
 </body>
 </html>
