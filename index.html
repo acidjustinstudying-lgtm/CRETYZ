@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>CRETYZ: The Last Seed</title>
+<style>
+  body { background:#0e1a12; color:#eafbe7; font-family: sans-serif; margin:0; padding:20px; }
+  h1 { text-align:center; }
+</style>
+</head>
+<body>
+<h1>🌱 CRETYZ: The Last Seed</h1>
+<div id="dynamic-content-root"></div>
+
+<script>
+/* ============================================================
+   CRETYZ v2 - Part 1 / ??? (새 스토리 기준 재시작)
+   Core 시스템 + 인큐베이션(5일 육성)
+   ============================================================ */
+
+// ---------- Core Enums ----------
+
+// 오리진의 성장 스타일. 인큐베이션 5일간의 물/햇빛 비율로 딱 한 번 결정되고,
+// 그 이후로는 바뀌지 않는다 (구버전처럼 실시간 재계산 안 함).
+const GrowthStyle = Object.freeze({
+  OFFENSIVE: "OFFENSIVE",
+  DEFENSIVE: "DEFENSIVE",
+  BALANCED: "BALANCED"
+});
+
+// 10개 챕터. 순서 = 스토리 진행 순서. 저장 데이터 호환을 위해 새 챕터는 끝에만 추가.
+const ChapterType = Object.freeze({
+  FORGOTTEN_GRASSLANDS: 1,   // 1장 - 잊혀진 초원 (튜토리얼)
+  MUSHROOM_FOREST: 2,        // 2장 - 버섯의 숲
+  SCORCHED_DESERT: 3,        // 3장 - 메마른 사막 (스킬조합 해금)
+  FROST_VALLEY: 4,           // 4장 - 서리 계곡
+  CRIMSON_VOLCANO: 5,        // 5장 - 붉은 화산림
+  FLORIA_CAPITAL: 6,         // 6장 - 꽃의 수도 플로리아
+  SKY_GARDEN: 7,             // 7장 - 하늘정원 에테리아
+  CANYON_OF_DEATH: 8,        // 8장 - 죽음의 협곡
+  FINAL_BATTLEGROUND: 9,     // 9장 - 마지막 결전장
+  WORLD_TREE: 10             // 10장 - 세계수
+});
+
+// 실시간 전투(브롤스타즈식)에서 스킬에 걸리는 상태이상. 비트플래그로 중첩 가능.
+const StatusEffectType = Object.freeze({
+  NONE: 0,
+  BURN: 1 << 0,
+  FREEZE: 1 << 1,
+  POISON: 1 << 2,
+  SLOW: 1 << 3,
+  STUN: 1 << 4
+});
+
+// ---------- GameEventBus ----------
+// 전역 이벤트 버스. 모든 시스템이 서로 직접 참조하지 않고 이 버스를 통해서만 통신한다.
+class GameEventBus {
+  static #subscribers = new Map();
+
+  static subscribe(eventName, handler) {
+    if (!this.#subscribers.has(eventName)) {
+      this.#subscribers.set(eventName, []);
+    }
+    this.#subscribers.get(eventName).push(handler);
+  }
+
+  static unsubscribe(eventName, handler) {
+    if (!this.#subscribers.has(eventName)) return;
+    const list = this.#subscribers.get(eventName);
+    const idx = list.indexOf(handler);
+    if (idx !== -1) list.splice(idx, 1);
+    if (list.length === 0) this.#subscribers.delete(eventName);
+  }
+
+  static publish(eventName, payload) {
+    if (!this.#subscribers.has(eventName)) return;
+    const snapshot = [...this.#subscribers.get(eventName)];
+    for (const handler of snapshot) {
+      try {
+        handler(payload);
+      } catch (err) {
+        console.error(`[GameEventBus] ${eventName} 처리 중 예외:`, err);
+      }
+    }
+  }
+}
+
+// ---------- 이벤트 이름 상수 ----------
+const CoreEvents = Object.freeze({
+  DAY_ADVANCED: "OnDayAdvanced",
+  ORIGIN_BORN: "OnOriginBorn",
+  CHAPTER_CHANGED: "OnChapterChanged",
+  STORY_FLAG_SET: "OnStoryFlagSet"
+});
+
+// ---------- GameManager ----------
+// 전역 진행 상태(현재 챕터 등)를 관리하는 싱글톤.
+class GameManager {
+  static #instance = null;
+
+  #currentChapter = ChapterType.FORGOTTEN_GRASSLANDS;
+
+  static get instance() {
+    if (!this.#instance) this.#instance = new GameManager();
+    return this.#instance;
+  }
+
+  get currentChapter() { return this.#currentChapter; }
+
+  advanceToChapter(chapter) {
+    this.#currentChapter = chapter;
+    GameEventBus.publish(CoreEvents.CHAPTER_CHANGED, { chapter });
+  }
+}
+
+// ---------- StoryFlags ----------
+// 특정 스토리 이벤트가 이미 일어났는지 기억. 프롤로그/컷씬 중복 방지 및 분기 조건으로 사용.
+class StoryFlags {
+  static SAVE_KEY = "cretyz_v2_story_flags";
+
+  constructor() {
+    this.flags = new Set();
+  }
+
+  has(flagName) {
+    return this.flags.has(flagName);
+  }
+
+  set(flagName) {
+    if (this.flags.has(flagName)) return;
+    this.flags.add(flagName);
+    GameEventBus.publish(CoreEvents.STORY_FLAG_SET, { flagName });
+    this.save();
+  }
+
+  toJSON() {
+    return { flags: Array.from(this.flags) };
+  }
+
+  static fromJSON(json) {
+    const state = new StoryFlags();
+    state.flags = new Set(json.flags);
+    return state;
+  }
+
+  save() {
+    try {
+      localStorage.setItem(StoryFlags.SAVE_KEY, JSON.stringify(this.toJSON()));
+      return true;
+    } catch (err) {
+      console.error("[StoryFlags] 저장 실패:", err);
+      return false;
+    }
+  }
+
+  static load() {
+    try {
+      const raw = localStorage.getItem(StoryFlags.SAVE_KEY);
+      if (!raw) return null;
+      return StoryFlags.fromJSON(JSON.parse(raw));
+    } catch (err) {
+      console.error("[StoryFlags] 로드 실패:", err);
+      return null;
+    }
+  }
+}
+
+// ---------- IncubationState ----------
+// 5일간의 인큐베이션 단계. 이후의 OriginRuntimeState(다음 파트)와는 별개의,
+// "태어나기 전" 상태만을 다루는 클래스. 하루 1회 물/햇빛 중 하나만 선택 가능.
+class IncubationState {
+  static SAVE_KEY = "cretyz_v2_incubation";
+  static TOTAL_DAYS = 5;
+
+  constructor() {
+    this.dayCount = 0;           // 지금까지 지난 일수 (0~5)
+    this.waterDays = 0;          // 물을 준 날 수
+    this.sunlightDays = 0;       // 햇빛을 쬔 날 수
+    this.todayChoiceMade = false;
+    this.isBorn = false;
+  }
+
+  get isComplete() {
+    return this.dayCount >= IncubationState.TOTAL_DAYS;
+  }
+
+  get daysRemaining() {
+    return Math.max(0, IncubationState.TOTAL_DAYS - this.dayCount);
+  }
+
+  // 하루에 한 번만 호출 가능. water=true면 물주기, false면 햇빛쬐기.
+  makeChoice(chooseWater) {
+    if (this.isComplete) {
+      console.warn("[IncubationState] 이미 인큐베이션이 끝났습니다.");
+      return false;
+    }
+    if (this.todayChoiceMade) {
+      console.warn("[IncubationState] 오늘은 이미 선택을 마쳤습니다.");
+      return false;
+    }
+
+    if (chooseWater) {
+      this.waterDays += 1;
+    } else {
+      this.sunlightDays += 1;
+    }
+    this.todayChoiceMade = true;
+    this.save();
+    return true;
+  }
+
+  // 하루가 지나감을 시뮬레이션 (실제 서비스에서는 자정 기준 실시간 체크로 교체 예정 - 지금은 프로토타입 단계)
+  advanceDay() {
+    if (!this.todayChoiceMade && !this.isComplete) {
+      console.warn("[IncubationState] 오늘의 선택을 하지 않고는 다음 날로 넘어갈 수 없습니다.");
+      return false;
+    }
+
+    this.dayCount += 1;
+    this.todayChoiceMade = false;
+
+    GameEventBus.publish(CoreEvents.DAY_ADVANCED, { dayCount: this.dayCount });
+
+    if (this.isComplete && !this.isBorn) {
+      this.isBorn = true;
+      const finalStyle = this.#computeFinalStyle();
+      GameEventBus.publish(CoreEvents.ORIGIN_BORN, { style: finalStyle });
+    }
+
+    this.save();
+    return true;
+  }
+
+  // 5일간 물/햇빛 비율로 최종 성장 스타일을 확정. 이 값은 이후 OriginRuntimeState 생성 시
+  // 그대로 주입되고, 그 뒤로는 변하지 않는다.
+  #computeFinalStyle() {
+    const total = this.waterDays + this.sunlightDays;
+    if (total === 0) return GrowthStyle.BALANCED; // 예외 방어: 아무 선택도 안 한 경우
+
+    const waterRatio = this.waterDays / total;
+    if (waterRatio >= 0.65) return GrowthStyle.OFFENSIVE;
+    if (waterRatio <= 0.35) return GrowthStyle.DEFENSIVE;
+    return GrowthStyle.BALANCED;
+  }
+
+  toJSON() {
+    return {
+      dayCount: this.dayCount,
+      waterDays: this.waterDays,
+      sunlightDays: this.sunlightDays,
+      todayChoiceMade: this.todayChoiceMade,
+      isBorn: this.isBorn
+    };
+  }
+
+  static fromJSON(json) {
+    const state = new IncubationState();
+    state.dayCount = json.dayCount;
+    state.waterDays = json.waterDays;
+    state.sunlightDays = json.sunlightDays;
+    state.todayChoiceMade = json.todayChoiceMade;
+    state.isBorn = json.isBorn;
+    return state;
+  }
+
+  save() {
+    try {
+      localStorage.setItem(IncubationState.SAVE_KEY, JSON.stringify(this.toJSON()));
+      return true;
+    } catch (err) {
+      console.error("[IncubationState] 저장 실패:", err);
+      return false;
+    }
+  }
+
+  static load() {
+    try {
+      const raw = localStorage.getItem(IncubationState.SAVE_KEY);
+      if (!raw) return null;
+      return IncubationState.fromJSON(JSON.parse(raw));
+    } catch (err) {
+      console.error("[IncubationState] 로드 실패:", err);
+      return null;
+    }
+  }
+}
+
+// ---------- 인큐베이션 UI (자가생성) ----------
+(function initIncubationUI() {
+  const style = document.createElement("style");
+  style.textContent = `
+    #incubation-panel {
+      max-width: 380px; margin: 30px auto; background:#132018; padding:20px;
+      border-radius:12px; text-align:center;
+    }
+    #incubation-visual { font-size: 70px; margin-bottom: 10px; }
+    #incubation-day-label { font-size:15px; color:#9fd88a; margin-bottom:14px; }
+    #incubation-buttons button {
+      background:#3C6E32; color:#eafbe7; border:none; padding:14px 20px;
+      margin: 0 6px; border-radius:10px; font-size:15px; cursor:pointer;
+    }
+    #incubation-buttons button:disabled {
+      background:#25381f; color:#6a8a63; cursor:not-allowed;
+    }
+    #incubation-status { margin-top:14px; font-size:13px; color:#9fd88a; min-height:18px; }
+    #incubation-summary {
+      margin-top:14px; font-size:12px; color:#6a8a63;
+    }
+  `;
+  document.head.appendChild(style);
+
+  const root = document.getElementById("dynamic-content-root");
+  const panel = document.createElement("div");
+  panel.id = "incubation-panel";
+  panel.innerHTML = `
+    <div id="incubation-visual">🥚</div>
+    <div id="incubation-day-label">-</div>
+    <div id="incubation-buttons">
+      <button id="btn-incubation-water">💧 물 주기</button>
+      <button id="btn-incubation-sunlight">☀️ 햇빛 쬐기</button>
+    </div>
+    <div id="incubation-status"></div>
+    <div id="incubation-summary"></div>
+  `;
+  root.appendChild(panel);
+
+  let incubation = IncubationState.load() || new IncubationState();
+
+  function refreshIncubationUI() {
+    if (incubation.isBorn) {
+      document.getElementById("incubation-visual").textContent = "🌱";
+      document.getElementById("incubation-day-label").textContent = "잡초가 태어났다.";
+      document.getElementById("btn-incubation-water").disabled = true;
+      document.getElementById("btn-incubation-sunlight").disabled = true;
+      document.getElementById("incubation-status").textContent = "저스틴 박사를 찾아 연구소로 향해야 한다.";
+      document.getElementById("incubation-summary").textContent =
+        `물 ${incubation.waterDays}일 / 햇빛 ${incubation.sunlightDays}일`;
+      return;
+    }
+
+    document.getElementById("incubation-day-label").textContent =
+      `${incubation.dayCount + 1}일차 / 전체 ${IncubationState.TOTAL_DAYS}일`;
+
+    const disable = incubation.todayChoiceMade;
+    document.getElementById("btn-incubation-water").disabled = disable;
+    document.getElementById("btn-incubation-sunlight").disabled = disable;
+
+    document.getElementById("incubation-status").textContent = disable
+      ? "오늘의 선택을 마쳤다. 인큐베이터 속 씨앗을 조용히 지켜본다."
+      : "오늘은 무엇을 해줄까?";
+
+    document.getElementById("incubation-summary").textContent =
+      `물 ${incubation.waterDays}일 / 햇빛 ${incubation.sunlightDays}일`;
+  }
+
+  document.getElementById("btn-incubation-water").addEventListener("click", () => {
+    if (incubation.makeChoice(true)) {
+      incubation.advanceDay();
+      refreshIncubationUI();
+    }
+  });
+
+  document.getElementById("btn-incubation-sunlight").addEventListener("click", () => {
+    if (incubation.makeChoice(false)) {
+      incubation.advanceDay();
+      refreshIncubationUI();
+    }
+  });
+
+  GameEventBus.subscribe(CoreEvents.ORIGIN_BORN, (e) => {
+    console.log(`[Incubation] 오리진 탄생. 최종 성장 스타일: ${e.style}`);
+  });
+
+  window.addEventListener("load", () => {
+    refreshIncubationUI();
+  });
+})();
+</script>
+</body>
+</html>
+
