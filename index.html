@@ -573,6 +573,694 @@ window.addEventListener("load", () => {
     triggerEdenAttack();
   }
 });
+  /* ============================================================
+   CRETYZ v2 - Part 4 / ??? (오염도 게이지 + 3루트 진화 + 챕터1 탐험)
+   ============================================================ */
+
+const ChapterEvents = Object.freeze({
+  CORRUPTION_CHANGED: "OnCorruptionChanged",
+  CORRUPTION_OVERLOAD: "OnCorruptionOverload",
+  EVOLUTION_ADVANCED: "OnEvolutionAdvanced",
+  BEAD_COLLECTED: "OnBeadCollected",
+  ORB_CRAFTED: "OnOrbCrafted",
+  MONSTER_ENCOUNTERED: "OnMonsterEncountered",
+  MONSTER_PURIFIED: "OnMonsterPurified",
+  CHAPTER_CLEARED: "OnChapterCleared"
+});
+
+// ---------- 오리진 3루트 진화 테이블 ----------
+// 1단계는 Part 2의 OriginBaseStatsByStyle과 값을 맞춰서, 진화 전에는 아무 변화도 없게 함.
+const OriginEvolutionTable = {
+  [GrowthStyle.OFFENSIVE]: {
+    1: { name: "잡초",           maxHealth: 30, attack: 8,  defense: 2 },
+    2: { name: "심연의 포식자",   maxHealth: 55, attack: 16, defense: 4 },
+    3: { name: "세계수의 대변자·흑", maxHealth: 95, attack: 30, defense: 8 }
+  },
+  [GrowthStyle.DEFENSIVE]: {
+    1: { name: "잡초",           maxHealth: 45, attack: 4,  defense: 6 },
+    2: { name: "성스러운 수호자", maxHealth: 85, attack: 8,  defense: 13 },
+    3: { name: "세계수의 대변자·백", maxHealth: 150, attack: 14, defense: 24 }
+  },
+  [GrowthStyle.BALANCED]: {
+    1: { name: "잡초",           maxHealth: 36, attack: 6,  defense: 4 },
+    2: { name: "에덴의 정원사",   maxHealth: 68, attack: 12, defense: 8 },
+    3: { name: "세계수의 의지",   maxHealth: 118, attack: 21, defense: 15 }
+  }
+};
+
+// ---------- OriginRuntimeState 확장 (프로토타입 방식 - 기존 클래스 재선언 안 함) ----------
+OriginRuntimeState.prototype.getEvolutionStage = function () {
+  return this.evolutionStage || 1;
+};
+
+// 챕터 진행도에 따라 2차(챕터3+)/3차(챕터8+) 진화 여부를 확인하고, 조건 충족 시 스탯을 갱신.
+OriginRuntimeState.prototype.checkEvolution = function (currentChapterNumber) {
+  const stage = this.getEvolutionStage();
+  let newStage = stage;
+
+  if (currentChapterNumber >= 8 && stage < 3) newStage = 3;
+  else if (currentChapterNumber >= 3 && stage < 2) newStage = 2;
+
+  if (newStage === stage) return; // 아직 조건 미달 - 정상 상황
+
+  this.evolutionStage = newStage;
+  this.#applyEvolutionStatsInternal();
+  this.save();
+  GameEventBus.publish(ChapterEvents.EVOLUTION_ADVANCED, {
+    style: this.growthStyle, stage: newStage, name: this.name
+  });
+};
+
+// private 필드는 프로토타입 확장에서 못 쓰므로 일반 메서드로 구현 (컨벤션상 접두사만 유지)
+OriginRuntimeState.prototype["#applyEvolutionStatsInternal"] = undefined; // 사용 안 함 (JS 문법 제약 회피용 메모)
+OriginRuntimeState.prototype.applyEvolutionStats = function () {
+  const table = OriginEvolutionTable[this.growthStyle][this.getEvolutionStage()];
+  const healthRatio = this.maxHealth > 0 ? this.currentHealth / this.maxHealth : 1;
+
+  this.name = table.name;
+  this.maxHealth = table.maxHealth;
+  this.attack = table.attack;
+  this.defense = table.defense;
+  this.currentHealth = Math.round(this.maxHealth * healthRatio); // 체력 비율 유지
+};
+OriginRuntimeState.prototype["#applyEvolutionStatsInternal"] = OriginRuntimeState.prototype.applyEvolutionStats;
+
+// toJSON / fromJSON도 evolutionStage를 저장/복원하도록 감싸서 확장 (원본 로직은 그대로 재사용)
+const __originalOriginToJSON = OriginRuntimeState.prototype.toJSON;
+OriginRuntimeState.prototype.toJSON = function () {
+  const base = __originalOriginToJSON.call(this);
+  base.evolutionStage = this.getEvolutionStage();
+  return base;
+};
+
+const __originalOriginFromJSON = OriginRuntimeState.fromJSON;
+OriginRuntimeState.fromJSON = function (json) {
+  const state = __originalOriginFromJSON(json);
+  state.evolutionStage = json.evolutionStage || 1;
+  return state;
+};
+
+// ---------- PurificationInventory ----------
+// 정화 구슬(5개=정화구 1개) 관리.
+class PurificationInventory {
+  static SAVE_KEY = "cretyz_v2_purification";
+
+  constructor() {
+    this.beadCount = 0;
+    this.orbCount = 0;
+  }
+
+  addBeads(amount) {
+    this.beadCount += amount;
+    GameEventBus.publish(ChapterEvents.BEAD_COLLECTED, { amount, total: this.beadCount });
+
+    while (this.beadCount >= 5) {
+      this.beadCount -= 5;
+      this.orbCount += 1;
+      GameEventBus.publish(ChapterEvents.ORB_CRAFTED, { total: this.orbCount });
+    }
+    this.save();
+  }
+
+  // 오염도를 낮추는 데 정화구 1개 소모. 성공하면 true.
+  consumeOrb() {
+    if (this.orbCount <= 0) return false;
+    this.orbCount -= 1;
+    this.save();
+    return true;
+  }
+
+  // 오염도 폭주 페널티: 정화구 절반 손실, 미완성 구슬은 전부 손실.
+  applyOverloadPenalty() {
+    this.orbCount = Math.floor(this.orbCount / 2);
+    this.beadCount = 0;
+    this.save();
+  }
+
+  toJSON() {
+    return { beadCount: this.beadCount, orbCount: this.orbCount };
+  }
+
+  static fromJSON(json) {
+    const inv = new PurificationInventory();
+    inv.beadCount = json.beadCount;
+    inv.orbCount = json.orbCount;
+    return inv;
+  }
+
+  save() {
+    try {
+      localStorage.setItem(PurificationInventory.SAVE_KEY, JSON.stringify(this.toJSON()));
+      return true;
+    } catch (err) {
+      console.error("[PurificationInventory] 저장 실패:", err);
+      return false;
+    }
+  }
+
+  static load() {
+    try {
+      const raw = localStorage.getItem(PurificationInventory.SAVE_KEY);
+      if (!raw) return null;
+      return PurificationInventory.fromJSON(JSON.parse(raw));
+    } catch (err) {
+      console.error("[PurificationInventory] 로드 실패:", err);
+      return null;
+    }
+  }
+}
+
+// ---------- CorruptionGaugeState ----------
+// 챕터(바이옴) 진입마다 0에서 시작. 시간 경과 + 몬스터 조우로 상승. 정화구로 낮출 수 있음.
+class CorruptionGaugeState {
+  static MAX_VALUE = 100;
+  static PASSIVE_RISE_PER_SEC = 0.8;
+  static RISE_PER_ENCOUNTER = 5;
+  static REDUCE_PER_ORB = 25;
+
+  constructor() {
+    this.value = 0;
+    this.isOverloaded = false;
+  }
+
+  tick(deltaSec) {
+    if (this.isOverloaded) return;
+    this.#add(CorruptionGaugeState.PASSIVE_RISE_PER_SEC * deltaSec);
+  }
+
+  onEncounter() {
+    this.#add(CorruptionGaugeState.RISE_PER_ENCOUNTER);
+  }
+
+  reduceWithOrb(purificationInventory) {
+    if (this.isOverloaded) return false;
+    const consumed = purificationInventory.consumeOrb();
+    if (!consumed) return false;
+    this.value = Math.max(0, this.value - CorruptionGaugeState.REDUCE_PER_ORB);
+    GameEventBus.publish(ChapterEvents.CORRUPTION_CHANGED, { value: this.value });
+    return true;
+  }
+
+  #add(amount) {
+    if (this.isOverloaded) return;
+    this.value = Math.min(CorruptionGaugeState.MAX_VALUE, this.value + amount);
+    GameEventBus.publish(ChapterEvents.CORRUPTION_CHANGED, { value: this.value });
+
+    if (this.value >= CorruptionGaugeState.MAX_VALUE) {
+      this.isOverloaded = true;
+      GameEventBus.publish(ChapterEvents.CORRUPTION_OVERLOAD, {});
+    }
+  }
+}
+
+// ---------- 챕터1 몬스터 데이터 (도감 전체 280종 중 일부 - 나머지는 이후 파트에서 데이터만 추가하면 됨) ----------
+const ChapterOneMonsters = {
+  SPORE_FLOWER:     { id: "SPORE_FLOWER",     name: "심연의 포자꽃",     emoji: "🌺", maxHealth: 12, attack: 3 },
+  POLLUTED_VINE:    { id: "POLLUTED_VINE",    name: "오염된 넝쿨 가시",  emoji: "🥀", maxHealth: 15, attack: 4 },
+  CORRUPTED_LEAF:   { id: "CORRUPTED_LEAF",   name: "타락한 가이아의 잎", emoji: "🍂", maxHealth: 10, attack: 2 },
+  TOXIC_FLUFF_SEED: { id: "TOXIC_FLUFF_SEED", name: "맹독성 솜털 씨앗",  emoji: "💮", maxHealth: 8,  attack: 5 },
+  SHADOW_BIND:      { id: "SHADOW_BIND",      name: "그림자 옭아매기",   emoji: "🕸️", maxHealth: 14, attack: 3 }
+};
+
+const ChapterOneBoss = {
+  id: "ROOT_RAKE_OF_DESPAIR", name: "절망의 뿌리 갈퀴", emoji: "🌳", maxHealth: 140, attack: 9
+};
+
+// ---------- Bestiary (도감) ----------
+class Bestiary {
+  static SAVE_KEY = "cretyz_v2_bestiary";
+
+  constructor() {
+    this.encountered = new Set();
+    this.purified = new Set();
+  }
+
+  recordEncounter(monsterId) {
+    if (!this.encountered.has(monsterId)) {
+      this.encountered.add(monsterId);
+      GameEventBus.publish(ChapterEvents.MONSTER_ENCOUNTERED, { monsterId });
+      this.save();
+    }
+  }
+
+  recordPurified(monsterId) {
+    if (!this.purified.has(monsterId)) {
+      this.purified.add(monsterId);
+      GameEventBus.publish(ChapterEvents.MONSTER_PURIFIED, { monsterId });
+      this.save();
+    }
+  }
+
+  toJSON() {
+    return { encountered: Array.from(this.encountered), purified: Array.from(this.purified) };
+  }
+
+  static fromJSON(json) {
+    const b = new Bestiary();
+    b.encountered = new Set(json.encountered);
+    b.purified = new Set(json.purified);
+    return b;
+  }
+
+  save() {
+    try {
+      localStorage.setItem(Bestiary.SAVE_KEY, JSON.stringify(this.toJSON()));
+      return true;
+    } catch (err) {
+      console.error("[Bestiary] 저장 실패:", err);
+      return false;
+    }
+  }
+
+  static load() {
+    try {
+      const raw = localStorage.getItem(Bestiary.SAVE_KEY);
+      if (!raw) return null;
+      return Bestiary.fromJSON(JSON.parse(raw));
+    } catch (err) {
+      console.error("[Bestiary] 로드 실패:", err);
+      return null;
+    }
+  }
+}
+
+// ---------- 전역 상태 초기화 ----------
+let purificationInventory = PurificationInventory.load() || new PurificationInventory();
+let bestiary = Bestiary.load() || new Bestiary();
+
+// 챕터 변경 시 자동으로 진화 조건 체크 (GameManager.advanceToChapter가 발행하는 이벤트를 그대로 활용)
+GameEventBus.subscribe(CoreEvents.CHAPTER_CHANGED, (e) => {
+  if (playerOrigin) playerOrigin.checkEvolution(e.chapter);
+});
+
+// ---------- FieldArena (챕터1 탐험용 - Part3의 BattleArena와 별개, 승리 가능한 실전투) ----------
+class FieldArena {
+  constructor(widthPx, heightPx) {
+    this.width = widthPx;
+    this.height = heightPx;
+
+    this.playerPos = { x: widthPx / 2, y: heightPx * 0.8 };
+    this.playerMaxHealth = playerOrigin.maxHealth;
+    this.playerHealth = playerOrigin.currentHealth > 0 ? playerOrigin.currentHealth : playerOrigin.maxHealth;
+
+    this.enemies = [];
+    this.skillCooldowns = new Map();
+    this.moveState = { up: false, down: false, left: false, right: false };
+
+    this.corruption = new CorruptionGaugeState();
+    this.killCount = 0;
+    this.bossUnlocked = false;
+    this.bossActive = false;
+    this.isOver = false;
+  }
+
+  spawnRegularEnemy() {
+    const pool = Object.values(ChapterOneMonsters);
+    const template = pool[Math.floor(Math.random() * pool.length)];
+    this.#spawnFromTemplate(template, false);
+    bestiary.recordEncounter(template.id);
+    this.corruption.onEncounter();
+  }
+
+  spawnBoss() {
+    this.#spawnFromTemplate(ChapterOneBoss, true);
+    this.bossActive = true;
+  }
+
+  #spawnFromTemplate(template, isBoss) {
+    const edge = Math.floor(Math.random() * 3);
+    let x, y;
+    if (edge === 0) { x = Math.random() * this.width; y = 0; }
+    else if (edge === 1) { x = 0; y = Math.random() * this.height * 0.6; }
+    else { x = this.width; y = Math.random() * this.height * 0.6; }
+
+    this.enemies.push({
+      id: crypto.randomUUID(),
+      templateId: template.id,
+      name: template.name,
+      emoji: template.emoji,
+      isBoss,
+      pos: { x, y },
+      health: template.maxHealth,
+      maxHealth: template.maxHealth,
+      attack: template.attack,
+      speed: isBoss ? 0.15 : 0.35
+    });
+  }
+
+  movePlayer(deltaMs) {
+    const speed = 0.3;
+    if (this.moveState.up) this.playerPos.y -= speed * deltaMs;
+    if (this.moveState.down) this.playerPos.y += speed * deltaMs;
+    if (this.moveState.left) this.playerPos.x -= speed * deltaMs;
+    if (this.moveState.right) this.playerPos.x += speed * deltaMs;
+
+    this.playerPos.x = Math.max(10, Math.min(this.width - 10, this.playerPos.x));
+    this.playerPos.y = Math.max(10, Math.min(this.height - 10, this.playerPos.y));
+  }
+
+  moveEnemiesAndResolveContact(deltaMs) {
+    for (const enemy of this.enemies) {
+      const dx = this.playerPos.x - enemy.pos.x;
+      const dy = this.playerPos.y - enemy.pos.y;
+      const dist = Math.hypot(dx, dy) || 1;
+
+      enemy.pos.x += (dx / dist) * enemy.speed * deltaMs;
+      enemy.pos.y += (dy / dist) * enemy.speed * deltaMs;
+
+      if (dist < 22) {
+        const dmgPerMs = (enemy.attack * 0.01) / 1000 * deltaMs * 1000; // 초당 attack*0.01 비율로 접촉 피해
+        this.playerHealth = Math.max(0, this.playerHealth - enemy.attack * 0.002 * deltaMs);
+      }
+    }
+  }
+
+  canUseSkill(skillId) {
+    const lastUsed = this.skillCooldowns.get(skillId) ?? -Infinity;
+    const skill = BaseSkills[skillId];
+    return performance.now() - lastUsed >= skill.cooldownMs;
+  }
+
+  useSkill(skillId) {
+    if (!this.canUseSkill(skillId)) return false;
+    const skill = BaseSkills[skillId];
+    this.skillCooldowns.set(skillId, performance.now());
+
+    let closest = null;
+    let closestDist = Infinity;
+    for (const enemy of this.enemies) {
+      const dist = Math.hypot(enemy.pos.x - this.playerPos.x, enemy.pos.y - this.playerPos.y);
+      if (dist <= skill.range && dist < closestDist) {
+        closest = enemy;
+        closestDist = dist;
+      }
+    }
+
+    if (closest) {
+      closest.health -= (skill.damage + playerOrigin.attack * 0.3);
+      if (closest.health <= 0) {
+        this.#onEnemyDefeated(closest);
+      }
+    }
+
+    return true;
+  }
+
+  #onEnemyDefeated(enemy) {
+    this.enemies = this.enemies.filter(e => e.id !== enemy.id);
+    bestiary.recordPurified(enemy.templateId);
+    purificationInventory.addBeads(enemy.isBoss ? 10 : (1 + Math.floor(Math.random() * 2)));
+
+    if (enemy.isBoss) {
+      this.bossActive = false;
+      this.isOver = true;
+      GameEventBus.publish(ChapterEvents.CHAPTER_CLEARED, { chapter: ChapterType.FORGOTTEN_GRASSLANDS });
+    } else {
+      this.killCount += 1;
+      if (this.killCount >= 5) this.bossUnlocked = true;
+    }
+  }
+}
+
+// ---------- 챕터1 탐험 UI (자가생성) ----------
+(function initChapterOneExploration() {
+  const style = document.createElement("style");
+  style.textContent = `
+    #ch1-entry-panel {
+      display:none; max-width:380px; margin:20px auto; background:#132018;
+      padding:18px; border-radius:12px; text-align:center;
+    }
+    #ch1-entry-panel button {
+      background:#3C6E32; color:#eafbe7; border:none; padding:12px 20px;
+      border-radius:10px; font-size:15px; cursor:pointer; margin-top:10px;
+    }
+    #field-arena-wrap { display:none; max-width:420px; margin:20px auto; }
+    #field-arena {
+      position:relative; width:100%; height:340px; background:#0a140d;
+      border:2px solid #3C6E32; border-radius:12px; overflow:hidden;
+    }
+    #field-corruption-bar-wrap { max-width:420px; margin:10px auto; }
+    #field-corruption-outer { background:#1c2b1f; border-radius:8px; height:12px; overflow:hidden; }
+    #field-corruption-fill { background:#a83fd6; height:100%; width:0%; transition: width 0.3s; }
+    #field-corruption-label { font-size:11px; color:#c99bf0; margin-bottom:4px; }
+    #field-resource-row {
+      display:flex; justify-content:center; gap:14px; margin:8px 0; font-size:13px; color:#9fd88a;
+    }
+    #field-player-sprite, .field-enemy-sprite {
+      position:absolute; font-size:24px; transform:translate(-50%,-50%);
+    }
+    #field-player-hp-outer, .field-enemy-hp-outer {
+      position:absolute; background:#1c2b1f; border-radius:6px; height:5px; overflow:hidden;
+    }
+    #field-player-hp-fill, .field-enemy-hp-fill { background:#7ED957; height:100%; width:100%; }
+    .field-enemy-hp-fill { background:#c9564d; }
+    .field-boss-hp-fill { background:#e0a020; }
+    #field-controls { display:flex; justify-content:space-between; margin-top:10px; }
+    #field-dpad { display:grid; grid-template-columns: repeat(3,44px); grid-template-rows: repeat(3,44px); gap:4px; }
+    #field-dpad button { background:#1c2b1f; color:#eafbe7; border:none; border-radius:8px; font-size:16px; }
+    #field-skill-buttons { display:grid; grid-template-columns: repeat(2,70px); gap:6px; }
+    #field-skill-buttons button {
+      background:#3C6E32; color:#eafbe7; border:none; border-radius:8px; font-size:11px; padding:8px 2px;
+    }
+    #field-skill-buttons button:disabled { background:#25381f; color:#6a8a63; }
+    #field-action-row { display:flex; justify-content:center; gap:8px; margin-top:10px; }
+    #field-action-row button {
+      background:#7a4a2b; color:#eafbe7; border:none; border-radius:8px; padding:8px 14px; font-size:12px;
+    }
+    #field-action-row button:disabled { background:#3a2a1c; color:#8a7360; }
+    #field-log-line { text-align:center; font-size:12px; color:#9fd88a; margin-top:8px; min-height:16px; }
+    #evolution-banner {
+      display:none; position:fixed; top:20px; left:50%; transform:translateX(-50%);
+      background:#3C6E32; color:#eafbe7; padding:12px 20px; border-radius:10px; z-index:1100; font-size:14px;
+    }
+  `;
+  document.head.appendChild(style);
+
+  const root = document.getElementById("dynamic-content-root");
+
+  const entryPanel = document.createElement("div");
+  entryPanel.id = "ch1-entry-panel";
+  entryPanel.innerHTML = `
+    <div>🌿 챕터 1 — 잊혀진 초원</div>
+    <div style="font-size:12px; color:#9fd88a; margin-top:6px;">평화롭지만 오염이 시작된 곳</div>
+    <button id="btn-enter-chapter1">탐험 시작</button>
+  `;
+  root.appendChild(entryPanel);
+
+  const wrap = document.createElement("div");
+  wrap.id = "field-arena-wrap";
+  wrap.innerHTML = `
+    <div id="field-corruption-bar-wrap">
+      <div id="field-corruption-label">오염도</div>
+      <div id="field-corruption-outer"><div id="field-corruption-fill"></div></div>
+    </div>
+    <div id="field-resource-row">
+      <div>💧 정화구슬: <span id="field-bead-count">0</span></div>
+      <div>🔮 정화구: <span id="field-orb-count">0</span></div>
+    </div>
+    <div id="field-arena">
+      <div id="field-player-hp-outer"><div id="field-player-hp-fill"></div></div>
+      <div id="field-player-sprite">🌱</div>
+    </div>
+    <div id="field-controls">
+      <div id="field-dpad">
+        <div></div><button id="field-dpad-up">▲</button><div></div>
+        <button id="field-dpad-left">◀</button><div></div><button id="field-dpad-right">▶</button>
+        <div></div><button id="field-dpad-down">▼</button><div></div>
+      </div>
+      <div id="field-skill-buttons">
+        <button id="field-skill-SEED_SHOT">🌰 씨앗</button>
+        <button id="field-skill-VINE_BIND">🌿 덩굴</button>
+        <button id="field-skill-ICE_POWDER">❄️ 얼음</button>
+        <button id="field-skill-FLAME_SHOT">🔥 불꽃</button>
+      </div>
+    </div>
+    <div id="field-action-row">
+      <button id="btn-use-orb">🔮 정화구 사용 (오염도 -25)</button>
+      <button id="btn-challenge-boss" disabled>👑 절망의 뿌리 갈퀴 도전</button>
+    </div>
+    <div id="field-log-line"></div>
+  `;
+  root.appendChild(wrap);
+
+  const evoBanner = document.createElement("div");
+  evoBanner.id = "evolution-banner";
+  document.body.appendChild(evoBanner);
+
+  let field = null;
+  let lastFrameTime = null;
+  let spawnTimerMs = 0;
+  let rafId = null;
+
+  function showChapter1Entry() {
+    entryPanel.style.display = "block";
+  }
+
+  document.getElementById("btn-enter-chapter1").addEventListener("click", () => {
+    entryPanel.style.display = "none";
+    startExploration();
+  });
+
+  function startExploration() {
+    wrap.style.display = "block";
+    field = new FieldArena(380, 340);
+    lastFrameTime = performance.now();
+    spawnTimerMs = 0;
+    document.getElementById("field-log-line").textContent = "초원을 탐색한다...";
+    rafId = requestAnimationFrame(fieldTick);
+  }
+
+  function endExploration(message) {
+    field.isOver = true;
+    cancelAnimationFrame(rafId);
+    playerOrigin.currentHealth = Math.max(1, Math.round(field.playerHealth));
+    playerOrigin.save();
+    document.getElementById("field-log-line").textContent = message;
+    setTimeout(() => { wrap.style.display = "none"; }, 1800);
+  }
+
+  function fieldTick(now) {
+    const deltaMs = now - lastFrameTime;
+    lastFrameTime = now;
+
+    if (!field.isOver) {
+      field.movePlayer(deltaMs);
+      field.moveEnemiesAndResolveContact(deltaMs);
+      field.corruption.tick(deltaMs / 1000);
+
+      if (field.corruption.isOverloaded) {
+        purificationInventory.applyOverloadPenalty();
+        endExploration("오염도가 폭주했다! 강제로 귀환한다. (정화구 절반 손실)");
+        return;
+      }
+
+      if (field.playerHealth <= 0) {
+        endExploration("잡초가 쓰러졌다... 기지로 돌아간다.");
+        return;
+      }
+
+      spawnTimerMs += deltaMs;
+      const spawnInterval = field.bossActive ? Infinity : 1800;
+      if (spawnTimerMs > spawnInterval && field.enemies.length < 5 && !field.bossActive) {
+        field.spawnRegularEnemy();
+        spawnTimerMs = 0;
+      }
+    }
+
+    renderField();
+    if (!field.isOver) rafId = requestAnimationFrame(fieldTick);
+  }
+
+  function renderField() {
+    const sprite = document.getElementById("field-player-sprite");
+    sprite.style.left = `${field.playerPos.x}px`;
+    sprite.style.top = `${field.playerPos.y}px`;
+
+    const hpOuter = document.getElementById("field-player-hp-outer");
+    hpOuter.style.left = `${field.playerPos.x - 18}px`;
+    hpOuter.style.top = `${field.playerPos.y - 22}px`;
+    hpOuter.style.width = "36px";
+    document.getElementById("field-player-hp-fill").style.width =
+      `${Math.max(0, field.playerHealth / field.playerMaxHealth) * 100}%`;
+
+    document.getElementById("field-corruption-fill").style.width = `${field.corruption.value}%`;
+    document.getElementById("field-bead-count").textContent = purificationInventory.beadCount;
+    document.getElementById("field-orb-count").textContent = purificationInventory.orbCount;
+
+    const arenaEl = document.getElementById("field-arena");
+    arenaEl.querySelectorAll(".field-enemy-sprite, .field-enemy-hp-outer").forEach(el => el.remove());
+
+    for (const enemy of field.enemies) {
+      const es = document.createElement("div");
+      es.className = "field-enemy-sprite";
+      es.textContent = enemy.emoji;
+      es.style.left = `${enemy.pos.x}px`;
+      es.style.top = `${enemy.pos.y}px`;
+      if (enemy.isBoss) es.style.fontSize = "42px";
+      arenaEl.appendChild(es);
+
+      const hpOuterEl = document.createElement("div");
+      hpOuterEl.className = "field-enemy-hp-outer";
+      hpOuterEl.style.width = enemy.isBoss ? "50px" : "24px";
+      hpOuterEl.style.left = `${enemy.pos.x - (enemy.isBoss ? 25 : 12)}px`;
+      hpOuterEl.style.top = `${enemy.pos.y - (enemy.isBoss ? 30 : 17)}px`;
+      const hpFillEl = document.createElement("div");
+      hpFillEl.className = enemy.isBoss ? "field-boss-hp-fill" : "field-enemy-hp-fill";
+      hpFillEl.style.height = "100%";
+      hpFillEl.style.width = `${Math.max(0, enemy.health / enemy.maxHealth) * 100}%`;
+      hpOuterEl.appendChild(hpFillEl);
+      arenaEl.appendChild(hpOuterEl);
+    }
+
+    for (const skillId of Object.keys(BaseSkills)) {
+      document.getElementById(`field-skill-${skillId}`).disabled = field.isOver || !field.canUseSkill(skillId);
+    }
+
+    document.getElementById("btn-use-orb").disabled = field.isOver || purificationInventory.orbCount <= 0;
+    document.getElementById("btn-challenge-boss").disabled = field.isOver || !field.bossUnlocked || field.bossActive;
+  }
+
+  function bindHold(buttonId, direction) {
+    const btn = document.getElementById(buttonId);
+    const start = () => { if (field) field.moveState[direction] = true; };
+    const stop = () => { if (field) field.moveState[direction] = false; };
+    btn.addEventListener("touchstart", start);
+    btn.addEventListener("touchend", stop);
+    btn.addEventListener("mousedown", start);
+    btn.addEventListener("mouseup", stop);
+    btn.addEventListener("mouseleave", stop);
+  }
+  bindHold("field-dpad-up", "up");
+  bindHold("field-dpad-down", "down");
+  bindHold("field-dpad-left", "left");
+  bindHold("field-dpad-right", "right");
+
+  for (const skillId of Object.keys(BaseSkills)) {
+    document.getElementById(`field-skill-${skillId}`).addEventListener("click", () => {
+      if (field && !field.isOver) field.useSkill(skillId);
+    });
+  }
+
+  document.getElementById("btn-use-orb").addEventListener("click", () => {
+    if (field) field.corruption.reduceWithOrb(purificationInventory);
+  });
+
+  document.getElementById("btn-challenge-boss").addEventListener("click", () => {
+    if (field && field.bossUnlocked && !field.bossActive) {
+      field.spawnBoss();
+      document.getElementById("field-log-line").textContent = "절망의 뿌리 갈퀴가 나타났다!";
+    }
+  });
+
+  GameEventBus.subscribe(ChapterEvents.CHAPTER_CLEARED, () => {
+    setTimeout(() => {
+      endExploration("초원이 정화되었다! 챕터 1 클리어.");
+      GameManager.instance.advanceToChapter(ChapterType.MUSHROOM_FOREST);
+    }, 300);
+  });
+
+  // 진화 배너 표시
+  GameEventBus.subscribe(ChapterEvents.EVOLUTION_ADVANCED, (e) => {
+    evoBanner.textContent = `✨ 진화! ${e.name}(으)로 성장했다.`;
+    evoBanner.style.display = "block";
+    setTimeout(() => { evoBanner.style.display = "none"; }, 3000);
+  });
+
+  // 2년 공백 대사가 끝나면(=seen_two_year_timeskip 플래그가 세팅되면) 챕터1 입장 패널을 띄움.
+  // 기존 Part 3 코드를 전혀 건드리지 않고, 이벤트 구독만으로 연결.
+  GameEventBus.subscribe(CoreEvents.STORY_FLAG_SET, (e) => {
+    if (e.flagName === "seen_two_year_timeskip") {
+      showChapter1Entry();
+    }
+  });
+
+  // 이미 그 플래그가 세팅된 상태로 게임을 다시 열었을 경우 대비
+  window.addEventListener("load", () => {
+    if (storyFlags.has("seen_two_year_timeskip") && !storyFlags.has("cleared_chapter1")) {
+      showChapter1Entry();
+    }
+  });
+})();
 </script>
 </body>
 </html>
