@@ -1374,6 +1374,538 @@ let breedingInventory = BreedingInventory.load() || new BreedingInventory();
     if (bestiary.purified.size > 0) openBtn.style.display = "block";
   });
 })();
+  /* ============================================================
+   CRETYZ v2 - Part 6 (범용 챕터 탐험 시스템 + 챕터2: 버섯의 숲)
+   ============================================================ */
+
+const ChapterTwoMonsters = {
+  BRAIN_CAP_MUSHROOM:    { id: "BRAIN_CAP_MUSHROOM",    name: "뇌를 먹는 갓 버섯",     emoji: "🍄", maxHealth: 18, attack: 6 },
+  GLOWING_FUNGUS:         { id: "GLOWING_FUNGUS",        name: "오염된 발광 균류",      emoji: "🔆", maxHealth: 14, attack: 4 },
+  HALLUCINOGENIC_HERB:    { id: "HALLUCINOGENIC_HERB",   name: "독기 머금은 환각초",    emoji: "🌾", maxHealth: 16, attack: 5 },
+  ROTTING_PARASITIC_WOOD: { id: "ROTTING_PARASITIC_WOOD", name: "썩어가는 기생 목재",   emoji: "🪵", maxHealth: 22, attack: 5 },
+  CORRUPTED_SPORE_MASS:   { id: "CORRUPTED_SPORE_MASS",  name: "타락한 포자 덩어리",    emoji: "🫧", maxHealth: 15, attack: 7 }
+};
+const ChapterTwoBoss = { id: "SPORE_LORD", name: "맹독의 포자 군주", emoji: "👑🍄", maxHealth: 190, attack: 12 };
+
+// ---------- GenericFieldArena ----------
+// Part4의 FieldArena와 로직은 거의 같지만, 몬스터풀/보스/챕터번호를 config로 받는다.
+// 이제부터 새 챕터는 이 클래스를 재사용하고, config만 새로 만들면 된다.
+class GenericFieldArena {
+  constructor(widthPx, heightPx, config) {
+    this.width = widthPx;
+    this.height = heightPx;
+    this.config = config;
+    this.playerPos = { x: widthPx / 2, y: heightPx * 0.8 };
+    this.playerMaxHealth = playerOrigin.maxHealth;
+    this.playerHealth = playerOrigin.currentHealth > 0 ? playerOrigin.currentHealth : playerOrigin.maxHealth;
+    this.enemies = [];
+    this.skillCooldowns = new Map();
+    this.moveState = { up: false, down: false, left: false, right: false };
+    this.corruption = new CorruptionGaugeState();
+    this.killCount = 0;
+    this.bossUnlocked = false;
+    this.bossActive = false;
+    this.isOver = false;
+  }
+
+  spawnRegularEnemy() {
+    const pool = Object.values(this.config.monsterPool);
+    const template = pool[Math.floor(Math.random() * pool.length)];
+    this.#spawnFromTemplate(template, false);
+    bestiary.recordEncounter(template.id);
+    this.corruption.onEncounter();
+  }
+
+  spawnBoss() { this.#spawnFromTemplate(this.config.bossTemplate, true); this.bossActive = true; }
+
+  #spawnFromTemplate(template, isBoss) {
+    const edge = Math.floor(Math.random() * 3);
+    let x, y;
+    if (edge === 0) { x = Math.random() * this.width; y = 0; }
+    else if (edge === 1) { x = 0; y = Math.random() * this.height * 0.6; }
+    else { x = this.width; y = Math.random() * this.height * 0.6; }
+    this.enemies.push({
+      id: crypto.randomUUID(), templateId: template.id, name: template.name, emoji: template.emoji,
+      isBoss, pos: { x, y }, health: template.maxHealth, maxHealth: template.maxHealth,
+      attack: template.attack, speed: isBoss ? 0.15 : 0.35
+    });
+  }
+
+  movePlayer(deltaMs) {
+    const speed = 0.3 * (this.config.movementSpeedMultiplier ?? 1);
+    if (this.moveState.up) this.playerPos.y -= speed * deltaMs;
+    if (this.moveState.down) this.playerPos.y += speed * deltaMs;
+    if (this.moveState.left) this.playerPos.x -= speed * deltaMs;
+    if (this.moveState.right) this.playerPos.x += speed * deltaMs;
+    this.playerPos.x = Math.max(10, Math.min(this.width - 10, this.playerPos.x));
+    this.playerPos.y = Math.max(10, Math.min(this.height - 10, this.playerPos.y));
+  }
+
+  moveEnemiesAndResolveContact(deltaMs) {
+    for (const enemy of this.enemies) {
+      const dx = this.playerPos.x - enemy.pos.x;
+      const dy = this.playerPos.y - enemy.pos.y;
+      const dist = Math.hypot(dx, dy) || 1;
+      enemy.pos.x += (dx / dist) * enemy.speed * deltaMs;
+      enemy.pos.y += (dy / dist) * enemy.speed * deltaMs;
+      if (dist < 22) this.playerHealth = Math.max(0, this.playerHealth - enemy.attack * 0.002 * deltaMs);
+    }
+  }
+
+  canUseSkill(skillId) {
+    const def = getSkillDefinition(skillId);
+    if (!def) return false;
+    const lastUsed = this.skillCooldowns.get(skillId) ?? -Infinity;
+    return performance.now() - lastUsed >= def.cooldownMs;
+  }
+
+  useSkill(skillId) {
+    if (!this.canUseSkill(skillId)) return false;
+    const skill = getSkillDefinition(skillId);
+    this.skillCooldowns.set(skillId, performance.now());
+    let closest = null, closestDist = Infinity;
+    for (const enemy of this.enemies) {
+      const dist = Math.hypot(enemy.pos.x - this.playerPos.x, enemy.pos.y - this.playerPos.y);
+      if (dist <= skill.range && dist < closestDist) { closest = enemy; closestDist = dist; }
+    }
+    if (closest) {
+      closest.health -= (skill.damage + playerOrigin.attack * 0.3);
+      if (closest.health <= 0) this.#onEnemyDefeated(closest);
+    }
+    return true;
+  }
+
+  #onEnemyDefeated(enemy) {
+    this.enemies = this.enemies.filter(e => e.id !== enemy.id);
+    bestiary.recordPurified(enemy.templateId);
+    purificationInventory.addBeads(enemy.isBoss ? 10 : (1 + Math.floor(Math.random() * 2)));
+
+    if (enemy.isBoss) {
+      this.bossActive = false;
+      this.isOver = true;
+      // 챕터별로 이벤트 이름을 분리해서, 예전 챕터1 리스너가 잘못 반응하지 않게 함
+      GameEventBus.publish(`OnChapterCleared_${this.config.chapterNumber}`, { chapter: this.config.chapterNumber });
+    } else {
+      this.killCount += 1;
+      if (this.killCount >= (this.config.killsToUnlockBoss ?? 5)) this.bossUnlocked = true;
+    }
+  }
+}
+
+// ---------- 챕터 탐험 UI 공장 함수 ----------
+// 새 챕터를 추가할 때는 이 함수를 다시 만들 필요 없이, createChapterExplorationUI(config)만 호출하면 된다.
+function createChapterExplorationUI(config) {
+  const p = config.chapterNumber;
+
+  const style = document.createElement("style");
+  style.textContent = `
+    #ch${p}-entry-panel { display:none; max-width:380px; margin:20px auto; background:#132018; padding:18px; border-radius:12px; text-align:center; }
+    #ch${p}-entry-panel button { background:#3C6E32; color:#eafbe7; border:none; padding:12px 20px; border-radius:10px; font-size:15px; cursor:pointer; margin-top:10px; }
+    #gfa${p}-wrap { display:none; max-width:420px; margin:20px auto; }
+    #gfa${p}-arena { position:relative; width:100%; height:340px; background:#0a140d; border:2px solid #3C6E32; border-radius:12px; overflow:hidden; transition:filter 0.5s; }
+    #gfa${p}-corruption-outer { background:#1c2b1f; border-radius:8px; height:12px; overflow:hidden; }
+    #gfa${p}-corruption-fill { background:#a83fd6; height:100%; width:0%; transition:width 0.3s; }
+    #gfa${p}-resource-row { display:flex; justify-content:center; gap:14px; margin:8px 0; font-size:13px; color:#9fd88a; }
+    #gfa${p}-controls { display:flex; justify-content:space-between; margin-top:10px; }
+    #gfa${p}-dpad { display:grid; grid-template-columns:repeat(3,44px); grid-template-rows:repeat(3,44px); gap:4px; }
+    #gfa${p}-dpad button { background:#1c2b1f; color:#eafbe7; border:none; border-radius:8px; font-size:16px; }
+    #gfa${p}-skill-buttons { display:flex; flex-wrap:wrap; gap:6px; max-width:150px; }
+    #gfa${p}-skill-buttons button { background:#3C6E32; color:#eafbe7; border:none; border-radius:8px; font-size:11px; padding:8px 6px; }
+    #gfa${p}-skill-buttons button:disabled { background:#25381f; color:#6a8a63; }
+    #gfa${p}-action-row { display:flex; justify-content:center; gap:8px; margin-top:10px; }
+    #gfa${p}-action-row button { background:#7a4a2b; color:#eafbe7; border:none; border-radius:8px; padding:8px 14px; font-size:12px; }
+    #gfa${p}-action-row button:disabled { background:#3a2a1c; color:#8a7360; }
+    #gfa${p}-log-line { text-align:center; font-size:12px; color:#9fd88a; margin-top:8px; min-height:16px; }
+  `;
+  document.head.appendChild(style);
+
+  const root = document.getElementById("dynamic-content-root");
+
+  const entryPanel = document.createElement("div");
+  entryPanel.id = `ch${p}-entry-panel`;
+  entryPanel.innerHTML = `
+    <div>${config.title}</div>
+    <div style="font-size:12px; color:#9fd88a; margin-top:6px;">${config.subtitle}</div>
+    <button id="btn-enter-chapter${p}">탐험 시작</button>
+  `;
+  root.appendChild(entryPanel);
+
+  const wrap = document.createElement("div");
+  wrap.id = `gfa${p}-wrap`;
+  wrap.innerHTML = `
+    <div>
+      <div style="font-size:11px; color:#c99bf0; margin-bottom:4px;">오염도</div>
+      <div id="gfa${p}-corruption-outer"><div id="gfa${p}-corruption-fill"></div></div>
+    </div>
+    <div id="gfa${p}-resource-row">
+      <div>💧 정화구슬: <span id="gfa${p}-bead-count">0</span></div>
+      <div>🔮 정화구: <span id="gfa${p}-orb-count">0</span></div>
+    </div>
+    <div id="gfa${p}-arena"></div>
+    <div id="gfa${p}-controls">
+      <div id="gfa${p}-dpad">
+        <div></div><button id="gfa${p}-dpad-up">▲</button><div></div>
+        <button id="gfa${p}-dpad-left">◀</button><div></div><button id="gfa${p}-dpad-right">▶</button>
+        <div></div><button id="gfa${p}-dpad-down">▼</button><div></div>
+      </div>
+      <div id="gfa${p}-skill-buttons"></div>
+    </div>
+    <div id="gfa${p}-action-row">
+      <button id="gfa${p}-btn-use-orb">🔮 정화구 사용 (오염도 -25)</button>
+      <button id="gfa${p}-btn-challenge-boss" disabled>👑 ${config.bossTemplate.name} 도전</button>
+    </div>
+    <div id="gfa${p}-log-line"></div>
+  `;
+  root.appendChild(wrap);
+
+  // 플레이어/적 스프라이트, HP바는 매 프레임 새로 만들지 않고 미리 만들어 재사용
+  const arenaEl = document.getElementById(`gfa${p}-arena`);
+  const playerSprite = document.createElement("div");
+  playerSprite.style.cssText = "position:absolute; font-size:24px; transform:translate(-50%,-50%);";
+  playerSprite.textContent = "🌱";
+  const playerHpOuter = document.createElement("div");
+  playerHpOuter.style.cssText = "position:absolute; background:#1c2b1f; border-radius:6px; height:5px; overflow:hidden; width:36px;";
+  const playerHpFill = document.createElement("div");
+  playerHpFill.style.cssText = "background:#7ED957; height:100%; width:100%;";
+  playerHpOuter.appendChild(playerHpFill);
+  arenaEl.appendChild(playerHpOuter);
+  arenaEl.appendChild(playerSprite);
+
+  let field = null, lastFrameTime = null, spawnTimerMs = 0, rafId = null;
+
+  function showEntry() { entryPanel.style.display = "block"; }
+
+  document.getElementById(`btn-enter-chapter${p}`).addEventListener("click", () => {
+    entryPanel.style.display = "none";
+    startExploration();
+  });
+
+  function renderSkillButtons() {
+    const container = document.getElementById(`gfa${p}-skill-buttons`);
+    container.innerHTML = "";
+    for (const skillId of getAvailableSkillIds()) {
+      const def = getSkillDefinition(skillId);
+      const btn = document.createElement("button");
+      btn.id = `gfa${p}-skill-${skillId}`;
+      btn.textContent = def.label;
+      btn.addEventListener("click", () => { if (field && !field.isOver) field.useSkill(skillId); });
+      container.appendChild(btn);
+    }
+  }
+
+  function startExploration() {
+    wrap.style.display = "block";
+    field = new GenericFieldArena(380, 340, config);
+    renderSkillButtons();
+    lastFrameTime = performance.now();
+    spawnTimerMs = 0;
+    document.getElementById(`gfa${p}-log-line`).textContent = "탐색을 시작한다...";
+    rafId = requestAnimationFrame(tick);
+  }
+
+  function endExploration(message) {
+    field.isOver = true;
+    cancelAnimationFrame(rafId);
+    playerOrigin.currentHealth = Math.max(1, Math.round(field.playerHealth));
+    playerOrigin.save();
+    document.getElementById(`gfa${p}-log-line`).textContent = message;
+    setTimeout(() => { wrap.style.display = "none"; }, 1800);
+  }
+
+  function tick(now) {
+    const deltaMs = now - lastFrameTime;
+    lastFrameTime = now;
+
+    if (!field.isOver) {
+      field.movePlayer(deltaMs);
+      field.moveEnemiesAndResolveContact(deltaMs);
+      field.corruption.tick(deltaMs / 1000);
+
+      if (field.corruption.isOverloaded) {
+        purificationInventory.applyOverloadPenalty();
+        endExploration("오염도가 폭주했다! 강제로 귀환한다. (정화구 절반 손실)");
+        return;
+      }
+      if (field.playerHealth <= 0) { endExploration("쓰러졌다... 기지로 돌아간다."); return; }
+
+      spawnTimerMs += deltaMs;
+      const spawnInterval = field.bossActive ? Infinity : 1800;
+      if (spawnTimerMs > spawnInterval && field.enemies.length < 5 && !field.bossActive) {
+        field.spawnRegularEnemy();
+        spawnTimerMs = 0;
+      }
+    }
+    render();
+    if (!field.isOver) rafId = requestAnimationFrame(tick);
+  }
+
+  function render() {
+    playerSprite.style.left = `${field.playerPos.x}px`;
+    playerSprite.style.top = `${field.playerPos.y}px`;
+    playerHpOuter.style.left = `${field.playerPos.x - 18}px`;
+    playerHpOuter.style.top = `${field.playerPos.y - 22}px`;
+    playerHpFill.style.width = `${Math.max(0, field.playerHealth / field.playerMaxHealth) * 100}%`;
+
+    document.getElementById(`gfa${p}-corruption-fill`).style.width = `${field.corruption.value}%`;
+    document.getElementById(`gfa${p}-bead-count`).textContent = purificationInventory.beadCount;
+    document.getElementById(`gfa${p}-orb-count`).textContent = purificationInventory.orbCount;
+
+    if (config.highCorruptionFilter) {
+      arenaEl.style.filter = field.corruption.value > 50 ? config.highCorruptionFilter : "none";
+    }
+
+    arenaEl.querySelectorAll(".gfa-enemy-node").forEach(el => el.remove());
+    for (const enemy of field.enemies) {
+      const es = document.createElement("div");
+      es.className = "gfa-enemy-node";
+      es.style.cssText = `position:absolute; font-size:${enemy.isBoss ? 42 : 24}px; transform:translate(-50%,-50%); left:${enemy.pos.x}px; top:${enemy.pos.y}px;`;
+      es.textContent = enemy.emoji;
+      arenaEl.appendChild(es);
+
+      const hpW = enemy.isBoss ? 50 : 24;
+      const hpOuterEl = document.createElement("div");
+      hpOuterEl.className = "gfa-enemy-node";
+      hpOuterEl.style.cssText = `position:absolute; background:#1c2b1f; border-radius:6px; height:5px; overflow:hidden; width:${hpW}px; left:${enemy.pos.x - hpW / 2}px; top:${enemy.pos.y - (enemy.isBoss ? 30 : 17)}px;`;
+      const hpFillEl = document.createElement("div");
+      hpFillEl.style.cssText = `height:100%; width:${Math.max(0, enemy.health / enemy.maxHealth) * 100}%; background:${enemy.isBoss ? "#e0a020" : "#c9564d"};`;
+      hpOuterEl.appendChild(hpFillEl);
+      arenaEl.appendChild(hpOuterEl);
+    }
+
+    for (const skillId of getAvailableSkillIds()) {
+      const btn = document.getElementById(`gfa${p}-skill-${skillId}`);
+      if (btn) btn.disabled = field.isOver || !field.canUseSkill(skillId);
+    }
+    document.getElementById(`gfa${p}-btn-use-orb`).disabled = field.isOver || purificationInventory.orbCount <= 0;
+    document.getElementById(`gfa${p}-btn-challenge-boss`).disabled = field.isOver || !field.bossUnlocked || field.bossActive;
+  }
+
+  function bindHold(buttonId, direction) {
+    const btn = document.getElementById(buttonId);
+    const start = () => { if (field) field.moveState[direction] = true; };
+    const stop = () => { if (field) field.moveState[direction] = false; };
+    btn.addEventListener("touchstart", start);
+    btn.addEventListener("touchend", stop);
+    btn.addEventListener("mousedown", start);
+    btn.addEventListener("mouseup", stop);
+    btn.addEventListener("mouseleave", stop);
+  }
+  bindHold(`gfa${p}-dpad-up`, "up"); bindHold(`gfa${p}-dpad-down`, "down");
+  bindHold(`gfa${p}-dpad-left`, "left"); bindHold(`gfa${p}-dpad-right`, "right");
+
+  document.getElementById(`gfa${p}-btn-use-orb`).addEventListener("click", () => {
+    if (field) field.corruption.reduceWithOrb(purificationInventory);
+  });
+  document.getElementById(`gfa${p}-btn-challenge-boss`).addEventListener("click", () => {
+    if (field && field.bossUnlocked && !field.bossActive) {
+      field.spawnBoss();
+      document.getElementById(`gfa${p}-log-line`).textContent = `${config.bossTemplate.name}이(가) 나타났다!`;
+    }
+  });
+
+  GameEventBus.subscribe(`OnChapterCleared_${p}`, () => {
+    setTimeout(() => {
+      endExploration(`${config.title} 클리어!`);
+      storyFlags.set(config.clearedFlag);
+      GameManager.instance.advanceToChapter(config.nextChapterType);
+    }, 300);
+  });
+
+  GameEventBus.subscribe(CoreEvents.STORY_FLAG_SET, (e) => { if (e.flagName === config.entryFlag) showEntry(); });
+  window.addEventListener("load", () => {
+    if (storyFlags.has(config.entryFlag) && !storyFlags.has(config.clearedFlag)) showEntry();
+  });
+}
+
+// ---------- 챕터2 실제 등록 ----------
+createChapterExplorationUI({
+  chapterNumber: 2,
+  title: "🍄 챕터 2 — 버섯의 숲",
+  subtitle: "독안개 속에 피어난 기괴하고 아름다운 균류의 세계",
+  monsterPool: ChapterTwoMonsters,
+  bossTemplate: ChapterTwoBoss,
+  nextChapterType: ChapterType.SCORCHED_DESERT,
+  entryFlag: "cleared_chapter1",
+  clearedFlag: "cleared_chapter2",
+  highCorruptionFilter: "blur(2px) hue-rotate(90deg) saturate(1.5)" // 포자 환각 기믹
+});/* ============================================================
+   CRETYZ v2 - Part 7 (챕터3: 메마른 사막 + 스킬 조합 시스템 해금)
+   ============================================================ */
+
+const ChapterThreeMonsters = {
+  TENTACLE_CACTUS:     { id: "TENTACLE_CACTUS",     name: "타락한 촉수 선인장",         emoji: "🌵", maxHealth: 24, attack: 7 },
+  SAND_ROT_GRASS:       { id: "SAND_ROT_GRASS",       name: "모래 먹는 부식 초",          emoji: "🌾", maxHealth: 20, attack: 6 },
+  ROLLING_THORN_WEED:    { id: "ROLLING_THORN_WEED",   name: "오염된 가시 돋친 굴러다니는 풀", emoji: "🥌", maxHealth: 22, attack: 7 },
+  VENOM_THORN_TREE:      { id: "VENOM_THORN_TREE",     name: "맹독성 가시나무",            emoji: "🌴", maxHealth: 26, attack: 8 },
+  HEAT_EMITTING_PLANT:   { id: "HEAT_EMITTING_PLANT",  name: "열기를 뿜는 오염 식물",       emoji: "🌶️", maxHealth: 20, attack: 9 }
+};
+const ChapterThreeBoss = { id: "SANDSTORM_THORN_KING", name: "모래폭풍의 가시왕", emoji: "👑🌵", maxHealth: 230, attack: 15 };
+
+createChapterExplorationUI({
+  chapterNumber: 3,
+  title: "🏜️ 챕터 3 — 메마른 사막",
+  subtitle: "열기와 모래폭풍 속에 살아남은 뒤틀린 생존자들",
+  monsterPool: ChapterThreeMonsters,
+  bossTemplate: ChapterThreeBoss,
+  nextChapterType: ChapterType.FROST_VALLEY,
+  entryFlag: "cleared_chapter2",
+  clearedFlag: "cleared_chapter3",
+  movementSpeedMultiplier: 0.75, // 모래폭풍 - 이동이 둔해짐
+  highCorruptionFilter: "sepia(0.4) brightness(0.85)"
+});
+
+// ---------- 스킬 조합 시스템 (챕터3 해금) ----------
+
+// 기존 BaseSkills 객체(Part3에서 const로 선언됨)에 독가루 스킬을 추가.
+// const는 "재할당"만 막을 뿐 객체 속성 추가는 막지 않으므로, 이렇게 append로 확장 가능.
+BaseSkills.POISON_POWDER = { id: "POISON_POWDER", label: "☠️ 독가루뿌리기", cooldownMs: 2600, range: 150, damage: 5, statusEffect: StatusEffectType.POISON };
+
+function getFusionKey(idA, idB) { return [idA, idB].sort().join("+"); }
+
+const SkillFusionTable = {
+  [getFusionKey("ICE_POWDER", "VINE_BIND")]:  { id: "ICE_VINE_BIND", label: "🥶🌿 얼음덩굴속박", cooldownMs: 3200, range: 150, damage: 9,  statusEffect: StatusEffectType.FREEZE },
+  [getFusionKey("FLAME_SHOT", "SEED_SHOT")]:  { id: "BLAZING_SEED",  label: "🔥🌰 화염씨앗",     cooldownMs: 2600, range: 230, damage: 12, statusEffect: StatusEffectType.BURN },
+  [getFusionKey("POISON_POWDER", "VINE_BIND")]: { id: "TOXIC_BIND",  label: "☠️🌿 맹독속박",    cooldownMs: 3000, range: 140, damage: 8,  statusEffect: StatusEffectType.POISON },
+  [getFusionKey("FLAME_SHOT", "ICE_POWDER")]: { id: "STEAM_BURST",   label: "💨🔥 증기폭발",     cooldownMs: 3400, range: 180, damage: 14 }
+};
+
+class SkillCraftingBench {
+  static SAVE_KEY = "cretyz_v2_craftedskills";
+
+  constructor() { this.craftedSkillIds = new Set(); }
+
+  canCombine(idA, idB) { return !!SkillFusionTable[getFusionKey(idA, idB)]; }
+
+  combine(idA, idB) {
+    const result = SkillFusionTable[getFusionKey(idA, idB)];
+    if (!result) return null;
+    this.craftedSkillIds.add(result.id);
+    this.save();
+    return result;
+  }
+
+  toJSON() { return { craftedSkillIds: Array.from(this.craftedSkillIds) }; }
+  static fromJSON(json) { const b = new SkillCraftingBench(); b.craftedSkillIds = new Set(json.craftedSkillIds); return b; }
+
+  save() {
+    try { localStorage.setItem(SkillCraftingBench.SAVE_KEY, JSON.stringify(this.toJSON())); return true; }
+    catch (err) { console.error("[SkillCraftingBench] 저장 실패:", err); return false; }
+  }
+
+  static load() {
+    try {
+      const raw = localStorage.getItem(SkillCraftingBench.SAVE_KEY);
+      if (!raw) return null;
+      return SkillCraftingBench.fromJSON(JSON.parse(raw));
+    } catch (err) { console.error("[SkillCraftingBench] 로드 실패:", err); return null; }
+  }
+}
+
+let skillCraftingBench = SkillCraftingBench.load() || new SkillCraftingBench();
+
+// getAvailableSkillIds / getSkillDefinition을 "다시 선언"해서 합성 스킬까지 포함하도록 확장.
+// 자바스크립트는 같은 이름의 function이 나중에 또 선언되면 나중 것이 실제로 쓰인다 -
+// Part4의 원래 코드는 한 글자도 건드리지 않고 기능만 넓히는 합법적인 방법.
+function getAvailableSkillIds() {
+  const ids = Object.keys(BaseSkills);
+  for (const monsterId of Object.keys(PurifiedFormData)) {
+    const skillDef = PurifiedFormData[monsterId].SKILL;
+    if (breedingInventory.learnedSkillIds.includes(skillDef.id)) ids.push(skillDef.id);
+  }
+  for (const skillId of skillCraftingBench.craftedSkillIds) ids.push(skillId);
+  return ids;
+}
+
+function getSkillDefinition(skillId) {
+  if (BaseSkills[skillId]) return BaseSkills[skillId];
+  for (const monsterId of Object.keys(PurifiedFormData)) {
+    if (PurifiedFormData[monsterId].SKILL.id === skillId) return PurifiedFormData[monsterId].SKILL;
+  }
+  for (const key in SkillFusionTable) {
+    if (SkillFusionTable[key].id === skillId) return SkillFusionTable[key];
+  }
+  return null;
+}
+
+// ---------- 스킬 제작대 UI ----------
+(function initSkillCraftingUI() {
+  const style = document.createElement("style");
+  style.textContent = `
+    #btn-open-crafting { display:none; max-width:420px; margin:12px auto; width:100%; background:#5a3a7a; color:#eafbe7; border:none; padding:12px; border-radius:10px; font-size:14px; cursor:pointer; }
+    #crafting-panel { display:none; max-width:420px; margin:12px auto; background:#132018; padding:16px; border-radius:12px; text-align:center; }
+    #crafting-panel select { background:#1c2b1f; color:#eafbe7; border:none; padding:8px; border-radius:6px; margin:4px; font-size:13px; }
+    #crafting-panel button.combine-btn { background:#5a3a7a; color:#eafbe7; border:none; padding:8px 16px; border-radius:8px; margin-top:8px; cursor:pointer; }
+    #crafting-result { margin-top:10px; font-size:13px; color:#c99bf0; min-height:18px; }
+    #crafted-list { margin-top:10px; font-size:12px; color:#9fd88a; text-align:left; }
+  `;
+  document.head.appendChild(style);
+
+  const root = document.getElementById("dynamic-content-root");
+
+  const openBtn = document.createElement("button");
+  openBtn.id = "btn-open-crafting";
+  openBtn.textContent = "🧪 스킬 제작대";
+  root.appendChild(openBtn);
+
+  const panel = document.createElement("div");
+  panel.id = "crafting-panel";
+  panel.innerHTML = `
+    <div>1단 스킬 두 개를 합쳐 새로운 스킬을 만든다.</div>
+    <div>
+      <select id="fusion-select-a"></select>
+      <select id="fusion-select-b"></select>
+    </div>
+    <button class="combine-btn" id="btn-combine-skills">합성</button>
+    <div id="crafting-result"></div>
+    <div id="crafted-list"></div>
+  `;
+  root.appendChild(panel);
+
+  function populateSelects() {
+    const baseIds = Object.keys(BaseSkills);
+    for (const selId of ["fusion-select-a", "fusion-select-b"]) {
+      const sel = document.getElementById(selId);
+      sel.innerHTML = baseIds.map(id => `<option value="${id}">${BaseSkills[id].label}</option>`).join("");
+    }
+  }
+
+  function renderCraftedList() {
+    const listEl = document.getElementById("crafted-list");
+    if (skillCraftingBench.craftedSkillIds.size === 0) {
+      listEl.textContent = "아직 합성한 스킬이 없다.";
+      return;
+    }
+    listEl.innerHTML = "합성 완료: " + Array.from(skillCraftingBench.craftedSkillIds)
+      .map(id => getSkillDefinition(id).label).join(", ");
+  }
+
+  document.getElementById("btn-combine-skills").addEventListener("click", () => {
+    const idA = document.getElementById("fusion-select-a").value;
+    const idB = document.getElementById("fusion-select-b").value;
+    if (idA === idB) {
+      document.getElementById("crafting-result").textContent = "같은 스킬끼리는 합성할 수 없다.";
+      return;
+    }
+    const result = skillCraftingBench.combine(idA, idB);
+    document.getElementById("crafting-result").textContent = result
+      ? `✨ ${result.label} 을(를) 습득했다!`
+      : "아직 발견되지 않은 조합이다.";
+    renderCraftedList();
+  });
+
+  openBtn.addEventListener("click", () => {
+    const isOpen = panel.style.display === "block";
+    panel.style.display = isOpen ? "none" : "block";
+    if (!isOpen) { populateSelects(); renderCraftedList(); }
+  });
+
+  function unlockIfChapter3(chapterNumber) {
+    if (chapterNumber >= 3) openBtn.style.display = "block";
+  }
+
+  GameEventBus.subscribe(CoreEvents.CHAPTER_CHANGED, (e) => unlockIfChapter3(e.chapter));
+  window.addEventListener("load", () => unlockIfChapter3(GameManager.instance.currentChapter));
+})();
 </script>
 </body>
 </html>
