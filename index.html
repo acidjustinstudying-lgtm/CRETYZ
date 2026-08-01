@@ -1906,6 +1906,297 @@ function getSkillDefinition(skillId) {
   GameEventBus.subscribe(CoreEvents.CHAPTER_CHANGED, (e) => unlockIfChapter3(e.chapter));
   window.addEventListener("load", () => unlockIfChapter3(GameManager.instance.currentChapter));
 })();
+  /* ============================================================
+   CRETYZ v2 - Part 8 (에덴 첫 등장 + 오픈 월드맵 + 이펙트)
+   ============================================================ */
+
+// ---------- 이미지가 있으면 쓰고, 없으면 이모지로 자동 대체 ----------
+// GitHub에 justin.png 등을 아직 안 올렸어도 게임이 깨지지 않도록 방어.
+const CharacterImagePaths = {
+  JUSTIN: "justin.png", PROTAGONIST: "protagonist.png", EDEN: "eden.png", ORIGIN: "origin.png"
+};
+
+function tryUseCharacterImage(imgElement, key, fallbackEmoji) {
+  const img = new Image();
+  img.onload = () => { imgElement.innerHTML = ""; imgElement.style.backgroundImage = `url('${CharacterImagePaths[key]}')`; };
+  img.onerror = () => { imgElement.textContent = fallbackEmoji; };
+  img.src = CharacterImagePaths[key];
+}
+
+// ---------- 에덴 첫 등장 이벤트 ----------
+StoryScenes.EDEN_FIRST_GLIMPSE = [
+  { speaker: StoryCharacters.NARRATOR, text: "사막의 지평선 너머, 검은 실루엣 하나가 이쪽을 바라보고 있다." },
+  { speaker: StoryCharacters.EDEN, text: "...아직도, 그 잡초를 키우고 있나." },
+  { speaker: StoryCharacters.EDEN, text: "부질없는 짓이야. 결국 다른 것들과 똑같이 오염될 텐데." },
+  { speaker: StoryCharacters.NARRATOR, text: "그는 말을 마치기도 전에, 모래바람 속으로 사라졌다." }
+];
+
+GameEventBus.subscribe(CoreEvents.CHAPTER_CHANGED, (e) => {
+  if (e.chapter === ChapterType.SCORCHED_DESERT && !storyFlags.has("seen_eden_glimpse")) {
+    setTimeout(() => {
+      playDialogue("EDEN_FIRST_GLIMPSE", () => storyFlags.set("seen_eden_glimpse"));
+    }, 500);
+  }
+});
+
+// ---------- 이펙트 레이어 (화면 흔들림 / 파티클 텍스트) ----------
+// 기존 전투 클래스는 전혀 건드리지 않고, 이미 발행되던 이벤트에만 반응해서
+// 현재 화면에 보이는 아레나 요소를 찾아 효과를 입힌다.
+(function initEffectsLayer() {
+  const style = document.createElement("style");
+  style.textContent = `
+    @keyframes screenShake {
+      0%, 100% { transform: translate(0, 0); }
+      20% { transform: translate(-4px, 3px); }
+      40% { transform: translate(4px, -3px); }
+      60% { transform: translate(-3px, -4px); }
+      80% { transform: translate(3px, 4px); }
+    }
+    .fx-shake { animation: screenShake 0.3s ease-in-out; }
+
+    @keyframes floatUpFade {
+      0% { transform: translate(-50%, 0); opacity: 1; }
+      100% { transform: translate(-50%, -60px); opacity: 0; }
+    }
+    .fx-float-text {
+      position: absolute; left: 50%; top: 40%; transform: translate(-50%, 0);
+      font-size: 18px; font-weight: bold; pointer-events: none;
+      animation: floatUpFade 1.1s ease-out forwards; z-index: 500;
+    }
+
+    @keyframes burstPop {
+      0% { transform: translate(-50%, -50%) scale(0.3); opacity: 1; }
+      100% { transform: translate(-50%, -50%) scale(2.2); opacity: 0; }
+    }
+    .fx-burst {
+      position: absolute; left: 50%; top: 50%; font-size: 40px;
+      pointer-events: none; animation: burstPop 0.6s ease-out forwards; z-index: 500;
+    }
+  `;
+  document.head.appendChild(style);
+
+  // 지금 화면에 실제로 보이는 전투 아레나 요소를 찾는다 (battle-arena, field-arena, gfa2-arena, gfa3-arena 등)
+  function findVisibleArena() {
+    const candidates = ["battle-arena", "field-arena", "gfa2-arena", "gfa3-arena"];
+    for (const id of candidates) {
+      const el = document.getElementById(id);
+      if (el && el.offsetParent !== null) return el;
+    }
+    return null;
+  }
+
+  function shakeVisibleArena() {
+    const el = findVisibleArena();
+    if (!el) return;
+    el.classList.remove("fx-shake");
+    void el.offsetWidth; // 리플로우를 강제해 애니메이션이 재시작되도록 함
+    el.classList.add("fx-shake");
+  }
+
+  function popText(text, color) {
+    const el = findVisibleArena();
+    if (!el) return;
+    const node = document.createElement("div");
+    node.className = "fx-float-text";
+    node.textContent = text;
+    node.style.color = color;
+    el.appendChild(node);
+    node.addEventListener("animationend", () => node.remove());
+  }
+
+  function popBurst(emoji) {
+    const el = findVisibleArena();
+    if (!el) return;
+    const node = document.createElement("div");
+    node.className = "fx-burst";
+    node.textContent = emoji;
+    el.appendChild(node);
+    node.addEventListener("animationend", () => node.remove());
+  }
+
+  // 적 처치: 화면 흔들림 + 텍스트
+  GameEventBus.subscribe(BattleEvents.ENEMY_KILLED, () => { shakeVisibleArena(); popText("Purified!", "#B6F09C"); });
+
+  // 정화 성공(챕터 탐험에서 처치): 초록 반짝 파티클
+  GameEventBus.subscribe(ChapterEvents.MONSTER_PURIFIED, () => popBurst("✨"));
+
+  // 오염도 폭주: 강한 흔들림 + 경고 텍스트
+  GameEventBus.subscribe(ChapterEvents.CORRUPTION_OVERLOAD, () => { shakeVisibleArena(); popText("오염 폭주!", "#e04040"); });
+
+  // 챕터 클리어: 축하 버스트
+  GameEventBus.subscribe(ChapterEvents.CHAPTER_CLEARED, () => popBurst("🎉"));
+  for (let n = 2; n <= 3; n++) {
+    GameEventBus.subscribe(`OnChapterCleared_${n}`, () => popBurst("🎉"));
+  }
+
+  // 진화: 화면 흔들림도 같이
+  GameEventBus.subscribe(ChapterEvents.EVOLUTION_ADVANCED, () => shakeVisibleArena());
+})();
+
+// ---------- 오픈 월드맵 ----------
+// 기존 챕터1~3 진입 버튼(btn-enter-chapter1/2/3)은 그대로 두고, 이 지도는
+// "추가 진입 경로"로 동작한다. 지도에서 걸어가면 해당 버튼을 프로그램적으로
+// 눌러주는 방식이라, 기존 챕터 로직은 완전히 그대로 재사용된다.
+const WorldMapLandmarks = [
+  { chapterNumber: 1, name: "🌿 잊혀진 초원", x: 100, y: 260, requiresFlag: null },
+  { chapterNumber: 2, name: "🍄 버섯의 숲",   x: 260, y: 160, requiresFlag: "cleared_chapter1" },
+  { chapterNumber: 3, name: "🏜️ 메마른 사막", x: 430, y: 260, requiresFlag: "cleared_chapter2" }
+];
+
+(function initWorldMap() {
+  const style = document.createElement("style");
+  style.textContent = `
+    #btn-open-worldmap {
+      display:none; max-width:420px; margin:12px auto; width:100%;
+      background:#2b5a3c; color:#eafbe7; border:none; padding:12px; border-radius:10px;
+      font-size:14px; cursor:pointer;
+    }
+    #worldmap-wrap { display:none; max-width:420px; margin:12px auto; }
+    #worldmap-viewport {
+      position:relative; width:100%; height:300px; overflow:hidden;
+      background:linear-gradient(#1c3a24, #0e1a12); border:2px solid #3C6E32; border-radius:12px;
+    }
+    #worldmap-world { position:absolute; width:600px; height:400px; }
+    .worldmap-landmark {
+      position:absolute; transform:translate(-50%, -50%); text-align:center;
+      font-size:28px; cursor:pointer;
+    }
+    .worldmap-landmark.locked { opacity:0.3; filter:grayscale(1); cursor:not-allowed; }
+    .worldmap-landmark-label { font-size:10px; color:#9fd88a; white-space:nowrap; }
+    #worldmap-player {
+      position:absolute; font-size:22px; transform:translate(-50%,-50%); z-index:10;
+    }
+    #worldmap-controls { display:flex; justify-content:center; margin-top:10px; }
+    #worldmap-dpad { display:grid; grid-template-columns:repeat(3,44px); grid-template-rows:repeat(3,44px); gap:4px; }
+    #worldmap-dpad button { background:#1c2b1f; color:#eafbe7; border:none; border-radius:8px; font-size:16px; }
+    #worldmap-prompt {
+      display:none; text-align:center; margin-top:8px; font-size:13px; color:#9fd88a;
+    }
+    #worldmap-prompt button {
+      background:#3C6E32; color:#eafbe7; border:none; padding:8px 16px; border-radius:8px; margin-top:6px; cursor:pointer;
+    }
+  `;
+  document.head.appendChild(style);
+
+  const root = document.getElementById("dynamic-content-root");
+
+  const openBtn = document.createElement("button");
+  openBtn.id = "btn-open-worldmap";
+  openBtn.textContent = "🗺️ 월드맵 (자유 이동)";
+  root.appendChild(openBtn);
+
+  const wrap = document.createElement("div");
+  wrap.id = "worldmap-wrap";
+  wrap.innerHTML = `
+    <div id="worldmap-viewport">
+      <div id="worldmap-world">
+        <div id="worldmap-player">🚶</div>
+      </div>
+    </div>
+    <div id="worldmap-controls">
+      <div id="worldmap-dpad">
+        <div></div><button id="wm-dpad-up">▲</button><div></div>
+        <button id="wm-dpad-left">◀</button><div></div><button id="wm-dpad-right">▶</button>
+        <div></div><button id="wm-dpad-down">▼</button><div></div>
+      </div>
+    </div>
+    <div id="worldmap-prompt"></div>
+  `;
+  root.appendChild(wrap);
+
+  const worldEl = document.getElementById("worldmap-world");
+  const viewportEl = document.getElementById("worldmap-viewport");
+  const playerEl = document.getElementById("worldmap-player");
+  const promptEl = document.getElementById("worldmap-prompt");
+
+  // 랜드마크 요소 미리 생성
+  for (const lm of WorldMapLandmarks) {
+    const node = document.createElement("div");
+    node.className = "worldmap-landmark";
+    node.id = `wm-landmark-${lm.chapterNumber}`;
+    node.style.left = `${lm.x}px`;
+    node.style.top = `${lm.y}px`;
+    node.innerHTML = `${lm.name.split(" ")[0]}<div class="worldmap-landmark-label">${lm.name.split(" ").slice(1).join(" ")}</div>`;
+    worldEl.appendChild(node);
+  }
+
+  let playerPos = { x: 100, y: 260 };
+  const moveState = { up: false, down: false, left: false, right: false };
+  let rafId = null, lastFrameTime = null;
+  let nearbyLandmark = null;
+
+  function isLandmarkUnlocked(lm) { return !lm.requiresFlag || storyFlags.has(lm.requiresFlag); }
+
+  function tick(now) {
+    const deltaMs = now - lastFrameTime;
+    lastFrameTime = now;
+    const speed = 0.15;
+
+    if (moveState.up) playerPos.y -= speed * deltaMs;
+    if (moveState.down) playerPos.y += speed * deltaMs;
+    if (moveState.left) playerPos.x -= speed * deltaMs;
+    if (moveState.right) playerPos.x += speed * deltaMs;
+    playerPos.x = Math.max(10, Math.min(590, playerPos.x));
+    playerPos.y = Math.max(10, Math.min(390, playerPos.y));
+
+    playerEl.style.left = `${playerPos.x}px`;
+    playerEl.style.top = `${playerPos.y}px`;
+
+    // 카메라: 플레이어가 항상 화면 중앙 근처에 오도록 world를 이동
+    const camX = Math.max(0, Math.min(600 - 420, playerPos.x - 210));
+    const camY = Math.max(0, Math.min(400 - 300, playerPos.y - 150));
+    worldEl.style.left = `${-camX}px`;
+    worldEl.style.top = `${-camY}px`;
+
+    nearbyLandmark = null;
+    for (const lm of WorldMapLandmarks) {
+      const node = document.getElementById(`wm-landmark-${lm.chapterNumber}`);
+      node.classList.toggle("locked", !isLandmarkUnlocked(lm));
+      const dist = Math.hypot(playerPos.x - lm.x, playerPos.y - lm.y);
+      if (dist < 30 && isLandmarkUnlocked(lm)) nearbyLandmark = lm;
+    }
+
+    if (nearbyLandmark) {
+      promptEl.style.display = "block";
+      promptEl.innerHTML = `${nearbyLandmark.name}에 도착했다.<br><button id="wm-enter-btn">입장하기</button>`;
+      document.getElementById("wm-enter-btn").addEventListener("click", () => {
+        wrap.style.display = "none";
+        document.getElementById(`btn-enter-chapter${nearbyLandmark.chapterNumber}`).click();
+      });
+    } else {
+      promptEl.style.display = "none";
+    }
+
+    rafId = requestAnimationFrame(tick);
+  }
+
+  function bindHold(buttonId, direction) {
+    const btn = document.getElementById(buttonId);
+    const start = () => { moveState[direction] = true; };
+    const stop = () => { moveState[direction] = false; };
+    btn.addEventListener("touchstart", start);
+    btn.addEventListener("touchend", stop);
+    btn.addEventListener("mousedown", start);
+    btn.addEventListener("mouseup", stop);
+    btn.addEventListener("mouseleave", stop);
+  }
+  bindHold("wm-dpad-up", "up"); bindHold("wm-dpad-down", "down");
+  bindHold("wm-dpad-left", "left"); bindHold("wm-dpad-right", "right");
+
+  openBtn.addEventListener("click", () => {
+    wrap.style.display = "block";
+    lastFrameTime = performance.now();
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = requestAnimationFrame(tick);
+  });
+
+  GameEventBus.subscribe(CoreEvents.STORY_FLAG_SET, (e) => {
+    if (e.flagName === "seen_two_year_timeskip") openBtn.style.display = "block";
+  });
+  window.addEventListener("load", () => {
+    if (storyFlags.has("seen_two_year_timeskip")) openBtn.style.display = "block";
+  });
+})();
 </script>
 </body>
 </html>
